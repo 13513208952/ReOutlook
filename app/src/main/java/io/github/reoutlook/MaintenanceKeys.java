@@ -1,0 +1,12 @@
+package io.github.reoutlook;
+
+/** Public halves of offline administrator keys. Private keys are never packaged in the app. */
+final class MaintenanceKeys {
+    private MaintenanceKeys() {}
+
+    static final String SIGNING_RSA_X509_BASE64 =
+            "MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA2NCi/trUtd39dWb+hz8g/2mwQTIetQe8MbWfwX3HzQba1m9V6gJeFUEduILcsQK/IB7keQxjQ9jrtm3poPpx9bTS+JVgMDz1GaBLGIm7xbJuLYsDfMfiAZSZ1AlV8t6ioDsCI/Qvx2AhkItapT/9WNKI2okbyzLU57jH4hIuGobinv+30zgaG8W/zjnW/Pl7lH8OqxuHDikcKEZHypiXnCL/J9+QJIdG1cN8SbWunbF0fPJmpuVcujZtB16Kga/JE2P+HtdKnHqYT4CVpdvJ9+mFtRncGOYJA6NnsvMy6L0Xvia7W+CEf6DZerGf3xZ2ZiLvg79CtmAYj931f8MhvSMABlzVDNXTNq3FFaBzvX3auEem0D3TsFruvzC87fzqHPjwPV0hTQ/cJFc2hnFnB2Qs5+Z6ANzNQebI0zGTiLE2Rh1mjHS0LIJVlr8sOaAdl75urBqZnKwVET00qa+7fjQPszunWZA2v9VOIyLxOrAKjQ7RHOspuvbEjz5ZktJTAgMBAAE=";
+
+    static final String EXPORT_RSA_X509_BASE64 =
+            "MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA4t2KWAcWYx1NGzPena7oL++DJ5Xc6nzPIH79l0g3yT1IxLzPemCBCUJ/dRkrLozlr5zQTtLqlO+/OLxPllk+KHEAlg/BlYGvwX5qIoagGmRQHJprjRWkEX3NnxnUsZRBibTte+iTG0XhtYuQ+oymWubOBpb0PiPEZjLsa+lHi63j/ouMFpXm9LaOJaFMAZkxLe1nxFXT6Bwc31T6HHdjkwgbUjb0CJaHXLQlVpi56rDkSvddOLlp1rKQ4bIvrQwBrEtugQaBAwF6o2L9745DepDomPiYUh7S+7KlpUbad08kNek2PO4eXpdUqEGZVJC3wZ/NoMLLckt1aHEzuk7sZz4p8G32re0yYYj+ymvr6Wivfv3HkF3kaPn4mO94vihyOBLSJBZE9RUuQBZFADUHeFSdTWDciM6GnpqhcLnmWJF/ukMseVyWKhmWbo0OzIwKgwX5yMbT7S59gE7hEO3BycqCfB1MhfVx1WLhk4TQQDJ6BOvVGSuyBum6tiGuLFdBAgMBAAE=";
+}

@@ -1,0 +1,17 @@
+.gradle/
+.idea/
+local.properties
+**/build/
+*.iml
+.cxx/
+.externalNativeBuild/
+
+# Administrator secrets and local diagnostics
+*.pem
+*.reoutlook-admin
+*.db
+*.sqlite
+*.sqlite3
+*.log
+__pycache__/
+*.py[cod]

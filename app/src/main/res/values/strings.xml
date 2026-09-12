@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">ReOutlook</string>
+    <string name="local_mail_count">本地 %1$d 封</string>
+</resources>
