@@ -45,8 +45,10 @@ import org.json.JSONTokener;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -58,6 +60,7 @@ public final class MainActivity extends Activity {
     private static final long DOUBLE_BACK_INTERVAL_MS = 2_000L;
     private static final long AUTO_SCROLL_INTERVAL_MS = 1_600L;
     private static final long MANUAL_SCROLL_PAUSE_MS = 3_500L;
+    private static final int MAX_TRACKED_CONVERSATION_MESSAGES = 200;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable autoCapture = new Runnable() {
@@ -91,6 +94,7 @@ public final class MainActivity extends Activity {
     private MailDatabase database;
     private ValueCallback<Uri[]> pendingFileChooser;
     private final ExecutorService cacheWriter = Executors.newSingleThreadExecutor();
+    private final Map<String, SyncWriteState> syncWriteStates = new HashMap<>();
     private boolean activityVisible;
     private boolean structuredCaptureEnabled;
 
@@ -558,12 +562,34 @@ public final class MainActivity extends Activity {
                             envelope.optString("bodyText"),
                             envelope.optString("sourceUrl")
                     );
+                    String syncToken = envelope.optString("syncToken");
+                    if (isValidSyncToken(syncToken)) {
+                        SyncWriteState state = syncWriteStates.computeIfAbsent(
+                                syncToken, ignored -> new SyncWriteState());
+                        state.receivedCount++;
+                        if (!saved) state.writeFailed = true;
+                    }
                     if (saved) runOnUiThread(() -> statusText.setText(
                             getString(R.string.local_mail_count, database.count())));
                 } else if ("conversationComplete".equals(type)) {
-                    database.markConversationSynced(
-                            envelope.optString("conversationId"),
-                            envelope.optString("revision"));
+                    String syncToken = envelope.optString("syncToken");
+                    int expectedCount = envelope.optInt("expectedMailCount", -1);
+                    SyncWriteState state = isValidSyncToken(syncToken)
+                            ? syncWriteStates.remove(syncToken)
+                            : null;
+                    boolean emptySuccess = expectedCount == 0 && state == null;
+                    boolean writesConfirmed = state != null && !state.writeFailed
+                            && state.receivedCount == expectedCount;
+                    if (expectedCount >= 0
+                            && expectedCount <= MAX_TRACKED_CONVERSATION_MESSAGES
+                            && (emptySuccess || writesConfirmed)) {
+                        database.markConversationSynced(
+                                envelope.optString("conversationId"),
+                                envelope.optString("revision"));
+                    }
+                } else if ("conversationDiscard".equals(type)) {
+                    String syncToken = envelope.optString("syncToken");
+                    if (isValidSyncToken(syncToken)) syncWriteStates.remove(syncToken);
                 } else if ("candidates".equals(type)) {
                     JSONArray values = envelope.optJSONArray("candidates");
                     if (values == null) values = envelope.optJSONArray("ids");
@@ -602,6 +628,16 @@ public final class MainActivity extends Activity {
                 // Outlook response schemas are expected to change; the DOM fallback remains available.
             }
         });
+    }
+
+    private static boolean isValidSyncToken(String value) {
+        return value != null && !value.isBlank() && value.length() <= 128
+                && !value.contains("\n") && !value.contains("\r");
+    }
+
+    private static final class SyncWriteState {
+        int receivedCount;
+        boolean writeFailed;
     }
 
     private void captureCurrentMessage(boolean userRequested) {

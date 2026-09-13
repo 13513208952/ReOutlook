@@ -21,7 +21,9 @@ public final class CaptureScript {
               let backfillRunning = false;
               let sessionBackfillCount = 0;
               let sessionFindPageCount = 0;
+              let sessionItemBodyFallbackCount = 0;
               let candidateBatchId = 0;
+              let conversationAttemptId = 0;
               let accountHint = '';
               let accountHintRank = 0;
               const findStreams = new Map();
@@ -29,6 +31,10 @@ public final class CaptureScript {
               const candidateRevisions = new Map();
               const MAX_BACKFILL_PER_SESSION = 50;
               const MAX_EXTRA_FIND_PAGES_PER_SESSION = 20;
+              const MAX_ITEM_BODY_FALLBACKS_PER_SESSION = 100;
+              const MAX_CONVERSATION_ITEMS = 100;
+              const pageSyncId = Date.now().toString(36) + '-' +
+                Math.random().toString(36).slice(2);
               const clean = value => (value || '').toString().replace(/\\s+/g, ' ').trim();
               const escapeHtml = value => (value || '').toString()
                 .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -51,15 +57,23 @@ public final class CaptureScript {
                 send({type: 'account', previousAccountHint});
               };
 
-              const publishItem = item => {
-                const body = item?.UniqueBody;
-                if (!item || !body || !body.Value) return;
+              const isExplicitSuccess = value =>
+                value?.ResponseClass === 'Success' && value?.ResponseCode === 'NoError';
+
+              const publishItem = (item, syncToken) => {
+                if (!item) return false;
+                // Draft editing is outside the offline archive. Outlook can omit draft bodies even
+                // when every submitted item in the conversation is complete.
+                if (item.IsDraft === true) return true;
+                const body = item.UniqueBody;
+                if (!body || typeof body.Value !== 'string') return false;
                 const mailbox = item.From?.Mailbox || item.Sender?.Mailbox || {};
                 const html = body.BodyType === 'HTML'
                   ? body.Value
                   : '<pre>' + escapeHtml(body.Value) + '</pre>';
                 send({
                   type: 'mail',
+                  syncToken,
                   identity: item.InternetMessageId || item.ItemId?.Id || '',
                   subject: clean(item.Subject) || '（无主题）',
                   sender: clean(mailbox.Name || mailbox.EmailAddress),
@@ -68,23 +82,114 @@ public final class CaptureScript {
                   bodyText: clean(body.Value.replace(/<[^>]*>/g, ' ')).slice(0, 200000),
                   sourceUrl: location.href
                 });
+                return body.IsTruncated !== true && html.length <= 1500000;
               };
 
-              const inspectConversationItems = (payload, requestedIds) => {
-                const responses = payload?.Body?.ResponseMessages?.Items || [];
-                for (const response of responses) {
-                  const nodes = response?.Conversation?.ConversationNodes || [];
-                  for (const node of nodes) {
-                    for (const item of (node?.Items || [])) publishItem(item);
-                  }
+              const fetchMissingItemBody = async item => {
+                const itemId = item?.ItemId?.Id || '';
+                if (!itemId || !getItemsTemplate || !getItemsRequest ||
+                    sessionItemBodyFallbackCount >= MAX_ITEM_BODY_FALLBACKS_PER_SESSION) return null;
+                sessionItemBodyFallbackCount++;
+                try {
+                  const itemShape = JSON.parse(JSON.stringify(
+                    getItemsTemplate?.Body?.ItemShape || {}));
+                  delete itemShape.CalculateOnlyFirstBody;
+                  const payload = {
+                    __type: 'GetItemJsonRequest:#Exchange',
+                    Header: JSON.parse(JSON.stringify(getItemsTemplate.Header || {})),
+                    Body: {
+                      __type: 'GetItemRequest:#Exchange',
+                      ItemShape: itemShape,
+                      ItemIds: [{__type: 'ItemId:#Exchange', Id: itemId}],
+                      ShapeName: 'ItemPart'
+                    }
+                  };
+                  const url = new URL(getItemsRequest.url);
+                  url.searchParams.set('action', 'GetItem');
+                  const headers = new Headers(getItemsRequest.headers);
+                  headers.set('action', 'GetItem');
+                  const request = new Request(url.toString(), {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify(payload),
+                    credentials: getItemsRequest.credentials,
+                    cache: getItemsRequest.cache,
+                    redirect: getItemsRequest.redirect,
+                    referrerPolicy: getItemsRequest.referrerPolicy
+                  });
+                  const response = await originalFetch(request);
+                  if (!response.ok) return null;
+                  const result = await response.json();
+                  const serviceResponse = result?.Body?.ResponseMessages?.Items?.[0];
+                  if (!isExplicitSuccess(serviceResponse)) return null;
+                  return serviceResponse?.Items?.[0] || null;
+                } catch (_) {
+                  return null;
                 }
-                for (const id of requestedIds) {
+              };
+
+              const publishItemWithFallback = async (item, syncToken) => {
+                if (publishItem(item, syncToken)) return true;
+                const body = item?.UniqueBody;
+                if (!item || item.IsDraft === true ||
+                    (body && typeof body.Value === 'string')) return false;
+                const loadedItem = await fetchMissingItemBody(item);
+                return publishItem(loadedItem, syncToken);
+              };
+
+              const inspectConversationItems = async (payload, requestedIds) => {
+                const responses = payload?.Body?.ResponseMessages?.Items || [];
+                const requested = new Set(requestedIds.filter(Boolean));
+                const completed = new Set();
+                const moreNeeded = new Set();
+                for (let index = 0; index < responses.length; index++) {
+                  const response = responses[index];
+                  if (!isExplicitSuccess(response)) continue;
+                  const conversation = response?.Conversation;
+                  if (!conversation) continue;
+                  let id = conversation?.ConversationId?.Id || '';
+                  if (!id && requestedIds.length === responses.length) id = requestedIds[index] || '';
+                  if (!id && requestedIds.length === 1) id = requestedIds[0];
+                  const syncToken = pageSyncId + ':' + String(++conversationAttemptId);
+                  const nodes = Array.isArray(conversation.ConversationNodes)
+                    ? conversation.ConversationNodes
+                    : [];
+                  let bodiesComplete = Array.isArray(conversation.ConversationNodes);
+                  let returnedItemCount = 0;
+                  let expectedMailCount = 0;
+                  for (const node of nodes) {
+                    if (!Array.isArray(node?.Items)) {
+                      bodiesComplete = false;
+                      continue;
+                    }
+                    for (const item of node.Items) {
+                      returnedItemCount++;
+                      if (item?.IsDraft !== true) expectedMailCount++;
+                      if (!await publishItemWithFallback(item, syncToken)) bodiesComplete = false;
+                    }
+                  }
+                  const totalNodes = Number(conversation.TotalConversationNodesCount);
+                  if (Number.isFinite(totalNodes) && totalNodes > nodes.length) {
+                    bodiesComplete = false;
+                    if (id) moreNeeded.add(id);
+                  }
+                  if (Number.isFinite(totalNodes) && totalNodes > 0 && returnedItemCount === 0) {
+                    bodiesComplete = false;
+                  }
+                  if (!requested.has(id) || completed.has(id) || !bodiesComplete) {
+                    send({type: 'conversationDiscard', syncToken});
+                    continue;
+                  }
+                  completed.add(id);
                   send({
                     type: 'conversationComplete',
+                    syncToken,
+                    expectedMailCount,
                     conversationId: id,
                     revision: candidateRevisions.get(id) || ''
                   });
                 }
+                return {completed, moreNeeded};
               };
 
               const publishCandidates = (payload, continuation) => {
@@ -129,6 +234,7 @@ public final class CaptureScript {
               };
 
               const handleFindResponse = (request, requestPayload, responsePayload) => {
+                if (!isExplicitSuccess(responsePayload?.Body)) return;
                 if (!requestPayload) {
                   publishCandidates(responsePayload, null);
                   return;
@@ -183,17 +289,35 @@ public final class CaptureScript {
                   const conversationId = pending.shift();
                   sessionBackfillCount++;
                   try {
-                    const payload = JSON.parse(JSON.stringify(getItemsTemplate));
-                    const request = payload.Body.Conversations[0];
-                    request.ConversationId.Id = conversationId;
-                    request.SyncState = '';
-                    payload.Body.Conversations = [request];
-                    const backfillRequest = new Request(getItemsRequest, {
-                      body: JSON.stringify(payload)
-                    });
-                    const response = await originalFetch(backfillRequest);
-                    if (!response.ok) throw new Error('HTTP ' + response.status);
-                    inspectConversationItems(await response.json(), [conversationId]);
+                    const configuredMaximum = Number(
+                      getItemsTemplate?.Body?.MaxItemsToReturn || 20);
+                    let maxItems = Math.max(1, Math.min(
+                      MAX_CONVERSATION_ITEMS, configuredMaximum));
+                    while (true) {
+                      const payload = JSON.parse(JSON.stringify(getItemsTemplate));
+                      const request = payload.Body.Conversations[0];
+                      request.ConversationId.Id = conversationId;
+                      request.SyncState = '';
+                      payload.Body.Conversations = [request];
+                      payload.Body.MaxItemsToReturn = maxItems;
+                      if (payload.Body.ItemShape) {
+                        payload.Body.ItemShape.CalculateOnlyFirstBody = false;
+                      }
+                      const backfillRequest = new Request(getItemsRequest, {
+                        body: JSON.stringify(payload)
+                      });
+                      const response = await originalFetch(backfillRequest);
+                      if (!response.ok) throw new Error('HTTP ' + response.status);
+                      const inspection = await inspectConversationItems(
+                        await response.json(), [conversationId]);
+                      if (inspection.completed.has(conversationId)) break;
+                      if (!inspection.moreNeeded.has(conversationId) ||
+                          maxItems >= MAX_CONVERSATION_ITEMS) {
+                        throw new Error('Conversation response was incomplete');
+                      }
+                      maxItems = Math.min(MAX_CONVERSATION_ITEMS, maxItems + 10);
+                      await sleep(300);
+                    }
                     await sleep(900);
                   } catch (_) {
                     queued.delete(conversationId);
@@ -234,18 +358,18 @@ public final class CaptureScript {
                     return response;
                   }
                   const action = url.searchParams.get('action');
-                  if (action === 'FindConversation' && requestCopy) {
+                  if (action === 'FindConversation' && requestCopy && response.ok) {
                     const findPayload = parseUrlPostData(requestCopy);
                     response.clone().json()
                       .then(value => handleFindResponse(requestCopy, findPayload, value))
                       .catch(() => {});
-                  } else if (action === 'GetConversationItems' && requestCopy) {
+                  } else if (action === 'GetConversationItems' && requestCopy && response.ok) {
                     Promise.all([requestCopy.clone().json(), response.clone().json()])
-                      .then(([requestPayload, responsePayload]) => {
+                      .then(async ([requestPayload, responsePayload]) => {
                         rememberGetItemsRequest(requestCopy, requestPayload);
                         const ids = (requestPayload?.Body?.Conversations || [])
                           .map(value => value?.ConversationId?.Id).filter(Boolean);
-                        inspectConversationItems(responsePayload, ids);
+                        await inspectConversationItems(responsePayload, ids);
                       }).catch(() => {});
                   }
                 } catch (_) {}
