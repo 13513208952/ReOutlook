@@ -6,11 +6,11 @@ ReOutlook 是一个本地优先的实验性 Outlook WebView 与离线阅读客�
 
 应用会在 Android 应用私有目录中保存已缓存邮件的主题、发件人、时间、正文、远端邮件标识、账号指纹和同步检查点。该目录受到 Android 应用沙箱与设备文件级加密保护。
 
-Outlook 登录 Cookie、Web Storage 和登录会话由 Android WebView 按网页客户端的正常方式管理。ReOutlook 的原生消息桥不会读取、导出或写入密码、Cookie、访问令牌或刷新令牌。
+Outlook 登录 Cookie、Web Storage 和登录会话由 Android WebView 按网页客户端的正常方式管理。ReOutlook 的原生消息桥不会读取、导出或写入密码、Cookie、访问令牌或刷新令牌。ReBrowser 是同一应用内的浏览器形态；每个外层工作区使用独立命名 Profile 保存网站状态，不与 ReOutlook 的 Default Profile 共用。
 
 ## 网络通信
 
-应用本身没有 ReOutlook 开发者服务器、遥测、广告或分析服务。在线邮件、登录和学校 MFA 流程直接发生在 Outlook、Microsoft 和学校认证网页之间。
+应用本身没有 ReOutlook 开发者服务器、遥测、广告或分析服务。在线邮件、登录和学校 MFA 流程直接发生在 Outlook、Microsoft 和学校认证网页之间；ReBrowser 访问由用户选择的网站时，也由 WebView 直接连接该网站。
 
 ## 离线邮件
 
@@ -18,7 +18,7 @@ Outlook 登录 Cookie、Web Storage 和登录会话由 Android WebView 按网页
 
 ## 显式备份与管理员维护
 
-Android 自动备份保持关闭。管理员维护接口没有普通应用内入口，只允许 Android shell 调用。导出必须同时具备有效的一次性管理员签名和机主在前台完成的 Android 系统锁屏凭据确认。
+Android 自动备份保持关闭。管理员维护接口没有普通应用内入口，只允许 Android shell 调用。ReOutlook 邮件导出必须同时具备有效的一次性管理员签名和机主在前台完成的 Android 系统锁屏凭据确认。ReBrowser 的受限开发控制命令可以由管理员密钥或系统锁屏确认二者之一授权，但不会提供 Cookie、令牌、Web Storage、任意 JavaScript 或邮件数据读取能力。
 
 管理员导出文件采用 AES-256-GCM 加密，内容密钥由独立的管理员 RSA-3072 导出公钥包装。持有对应导出私钥的人可以解密已获机主授权的导出文件。导出中不包含密码、Cookie、访问令牌、刷新令牌或 Web Storage。
 

@@ -101,10 +101,12 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        SystemBackDispatcher.register(this, this::handleSystemBack);
         // Repair a vendor package-manager override left by an interrupted maintenance test.
         MaintenanceAuthorizer.ensureEntryPointsEnabled(this);
         // A normal launch invalidates any interrupted, short-lived administrator challenge.
         MaintenanceAuthorizer.clearPendingChallenge(this);
+        ReBrowserAdminAuthorizer.clearPendingChallenge(this);
         database = new MailDatabase(this);
         database.cleanupLegacyDuplicates();
         setContentView(createContentView());
@@ -112,6 +114,14 @@ public final class MainActivity extends Activity {
 
         boolean restored = savedInstanceState != null && webView.restoreState(savedInstanceState) != null;
         if (!restored) webView.loadUrl(OUTLOOK_URL);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        MaintenanceAuthorizer.clearPendingChallenge(this);
+        ReBrowserAdminAuthorizer.clearPendingChallenge(this);
     }
 
     private View createContentView() {
@@ -324,6 +334,10 @@ public final class MainActivity extends Activity {
         drawer.addView(drawerItem("本地邮件", "阅读已经保存的邮件", view -> {
             closeDrawer();
             startActivity(new Intent(this, ArchiveActivity.class));
+        }));
+        drawer.addView(drawerItem("ReBrowser", "切换到同一应用内的隔离浏览器", view -> {
+            closeDrawer();
+            startActivity(new Intent(this, ReBrowserActivity.class));
         }));
         drawer.addView(drawerItem("刷新 Outlook", "重新连接并继续同步", view -> {
             closeDrawer();
@@ -702,13 +716,18 @@ public final class MainActivity extends Activity {
         if (webView == null || !webView.canGoBack()) return false;
         String currentUrl = webView.getUrl();
         if (!isOutlookMailOrigin(currentUrl)) return true;
-        String path = Uri.parse(currentUrl).getPath();
-        if (path == null) return true;
+        return !isOutlookHomePage(currentUrl);
+    }
+
+    private static boolean isOutlookHomePage(String value) {
+        if (!isOutlookMailOrigin(value)) return false;
+        String path = Uri.parse(value).getPath();
+        if (path == null) return false;
         path = path.toLowerCase(Locale.ROOT).replaceAll("/+$", "");
-        if (path.isEmpty() || path.equals("/mail")) return false;
+        if (path.isEmpty() || path.equals("/mail")) return true;
         String[] segments = path.split("/");
-        // /mail/inbox、/mail/sentitems 等单一文件夹路由属于邮箱列表顶层。
-        return segments.length > 3;
+        // /mail/inbox、/mail/sentitems 等单一文件夹路由属于邮箱列表主页层。
+        return segments.length <= 3;
     }
 
     private void handleSystemBack() {
@@ -722,6 +741,11 @@ public final class MainActivity extends Activity {
             return;
         }
         if (isViewingOutlookMessage()) {
+            lastBackPressAt = 0;
+            webView.loadUrl(OUTLOOK_URL);
+            return;
+        }
+        if (webView != null && !isOutlookHomePage(webView.getUrl())) {
             lastBackPressAt = 0;
             webView.loadUrl(OUTLOOK_URL);
             return;

@@ -4,17 +4,12 @@
     <application>
         <activity
             android:name=".ReBrowserProbeActivity"
+            android:excludeFromRecents="true"
             android:exported="true"
             android:label="@string/rebrowser_probe_name"
-            android:launchMode="singleTask"
+            android:permission="android.permission.DUMP"
             android:screenOrientation="portrait"
-            android:taskAffinity="io.github.reoutlook.rebrowser.probe"
             android:windowSoftInputMode="adjustResize"
-            tools:ignore="DiscouragedApi,LockedOrientationActivity">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            tools:ignore="DiscouragedApi,LockedOrientationActivity" />
     </application>
 </manifest>

@@ -25,7 +25,10 @@
 12. 可持久化开启 WebView 邮件列表自动滚动，抽屉打开、邮件详情页或用户触摸页面时自动暂停；
 13. 根据 Outlook anchor mailbox 建立账号指纹，邮件、去重索引和同步检查点全部按账号隔离；
 14. 内置无普通界面入口、仅持 Android shell 权限可调用的管理员维护通道，必须同时通过离线管理员签名与机主系统锁屏验证，才能生成管理员公钥加密的账号导出；
-15. debug APK 内提供独立的 ReBrowser Multi-Profile 探针，用于验证“一个总标签页对应一个命名 Profile、多个子 Tab 共用该 Profile”的隔离模型；release APK 不包含此探针。
+15. debug APK 内提供独立的 ReBrowser Multi-Profile 探针，用于验证“一个总标签页对应一个命名 Profile、多个子 Tab 共用该 Profile”的隔离模型；release APK 不包含此探针；
+16. 正式加入 ReBrowser 早期工作区界面：它是同一个 APK、同一个应用入口中的第二种形态；Chrome 风格总标签页总览中的每张卡片代表一个完整工作区，工作区内部另有独立的子 Tab 条和子 Tab 卡片总览；
+17. ReBrowser 已建立浏览器全局设置页，可配置主页、搜索引擎、JavaScript、第三方 Cookie 和桌面模式；系统返回按钮与边缘手势统一遵循“网页历史→主页→两次返回退出”；
+18. ReBrowser 提供仅限 ADB shell 的一次性管理员控制通道，可选择管理员密钥签名或机主系统锁屏确认二者之一，且不降低 ReOutlook 邮件导出的双重授权要求。
 
 学校登录、Duo、移动版 Outlook、自动分页、结构化正文采集和离线正文均已在真实设备上验证。v2 → v4 账号隔离迁移已在保留 612 封邮件的真实数据库上通过，PUID/SMTP 同账号别名已合并；会话修订变化后会重新同步；ADB 管理员签名、机主锁屏确认、加密导出和离线解密也已在主力机完成端到端验证。
 
@@ -33,7 +36,7 @@
 
 目前尚未实现附件及远程图片缓存、多账号界面、后台同步和离线操作回放。数据库位于 Android 凭据加密的应用私有目录，但没有额外采用 SQLCipher 整库加密；这是当前选定的“普通官方客户端式”安全模型。
 
-ReBrowser 仍处于不影响 ReOutlook 的初步探索阶段。它只使用命名 Profile，绝不回退到 ReOutlook 使用的 Default Profile；当前模型、探针范围和真机结果见 [docs/REBROWSER_EXPLORATION.md](docs/REBROWSER_EXPLORATION.md)。
+ReBrowser 已进入不影响 ReOutlook 的早期 MVP 阶段。它不是第二个软件：release 仅保留一个桌面启动入口，并在应用内部从 ReOutlook 切换。它只使用命名 Profile，绝不回退到 ReOutlook 使用的 Default Profile；总标签页、子 Tab、生命周期、探针范围和真机结果见 [docs/REBROWSER_EXPLORATION.md](docs/REBROWSER_EXPLORATION.md)。
 
 ## 安全边界
 
@@ -62,7 +65,7 @@ export ANDROID_HOME=$HOME/Android/Sdk
 2. 在第二个真实 Outlook 账号上验证账号切换与分区隔离；
 3. 将数据访问层迁移到 Room，并建立 v4 数据库的无损迁移测试；
 4. 实现普通用户显式备份、同账号验证和导入回滚；
-5. 在运行时 Multi-Profile 门控下实现 ReBrowser 最小工作区：一个命名 Profile、多个子 Tab 和临时／副／主生命周期。
+5. 继续完善 ReBrowser：网页缩略图、站点信息、书签、下载、分享、深色模式、完整新标签页和受限大小的历史状态恢复。
 
 ## 隐私与安全
 
