@@ -337,7 +337,7 @@ public final class MainActivity extends Activity {
         }));
         drawer.addView(drawerItem("ReBrowser", "切换到同一应用内的隔离浏览器", view -> {
             closeDrawer();
-            startActivity(new Intent(this, ReBrowserActivity.class));
+            ModeRouter.openReBrowser(this);
         }));
         drawer.addView(drawerItem("刷新 Outlook", "重新连接并继续同步", view -> {
             closeDrawer();

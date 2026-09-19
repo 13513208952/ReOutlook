@@ -6,7 +6,7 @@ ReOutlook 是一个本地优先的实验性 Outlook WebView 与离线阅读客�
 
 应用会在 Android 应用私有目录中保存已缓存邮件的主题、发件人、时间、正文、远端邮件标识、账号指纹和同步检查点。该目录受到 Android 应用沙箱与设备文件级加密保护。
 
-Outlook 登录 Cookie、Web Storage 和登录会话由 Android WebView 按网页客户端的正常方式管理。ReOutlook 的原生消息桥不会读取、导出或写入密码、Cookie、访问令牌或刷新令牌。ReBrowser 是同一应用内的浏览器形态；每个外层工作区使用独立命名 Profile 保存网站状态，不与 ReOutlook 的 Default Profile 共用。
+Outlook 登录 Cookie、Web Storage 和登录会话由 Android WebView 按网页客户端的正常方式管理。ReOutlook 的原生消息桥不会读取、导出或写入密码、Cookie、访问令牌或刷新令牌。ReBrowser 是同一应用内的浏览器形态；每个外层总标签页使用独立命名 Profile 保存网站状态，不与 ReOutlook 的 Default Profile 共用。用户主动加入收藏栏的网址会在应用私有目录中保存网页标题和完整网址。书签栏不保存普通网址，而是登记用户已上锁的副总标签页及其子标签页元数据；对应网站状态仍保存在该总标签页的命名 Profile 中。
 
 ## 网络通信
 

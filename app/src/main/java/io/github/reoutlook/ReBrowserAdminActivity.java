@@ -156,12 +156,8 @@ public final class ReBrowserAdminActivity extends Activity {
             return;
         }
         if (ReBrowserAdminAuthorizer.OP_SWITCH_TO_OUTLOOK.equals(operation)) {
-            Intent outlook = new Intent(this, MainActivity.class)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                            | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                            | Intent.FLAG_ACTIVITY_SINGLE_TOP);
             ReBrowserAdminProvider.recordResult(this, "completed:SWITCH_TO_OUTLOOK");
-            startActivity(outlook);
+            ModeRouter.openOutlook(this);
             finish();
             return;
         }

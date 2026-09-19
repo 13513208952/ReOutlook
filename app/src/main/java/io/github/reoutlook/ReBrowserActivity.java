@@ -6,10 +6,15 @@ import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.content.res.ColorStateList;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Message;
 import android.os.SystemClock;
@@ -17,6 +22,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.DownloadListener;
@@ -27,13 +33,13 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
-import android.widget.HorizontalScrollView;
+import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.PopupMenu;
+import android.widget.PopupWindow;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -63,28 +69,36 @@ public final class ReBrowserActivity extends Activity {
     private static final long DOUBLE_BACK_INTERVAL_MS = 2_000L;
 
     private final List<ReBrowserStore.Workspace> workspaces = new ArrayList<>();
+    private final List<ReBrowserStore.Workspace> shelvedSecondaryWorkspaces = new ArrayList<>();
+    private final List<ReBrowserFavorites.Favorite> bookmarks = new ArrayList<>();
     private final Map<String, WebView> tabWebViews = new HashMap<>();
     private final Map<WebView, ReBrowserStore.Tab> webViewTabs = new IdentityHashMap<>();
     private final Set<String> loadedTabIds = new java.util.HashSet<>();
+    private final Set<String> selectedWorkspaceIds = new java.util.HashSet<>();
+    private final Set<String> selectedChildTabIds = new java.util.HashSet<>();
 
     private ReBrowserStore store;
     private ReBrowserPreferences browserPreferences;
+    private ReBrowserFavorites bookmarkStore;
     private ReBrowserStore.Workspace activeWorkspace;
     private FrameLayout root;
     private FrameLayout webContainer;
     private LinearLayout browserToolbar;
     private EditText omnibox;
     private TextView workspaceCountButton;
-    private LinearLayout childTabStrip;
-    private HorizontalScrollView childStripScroller;
-    private LinearLayout childStripContent;
-    private TextView childCountButton;
     private ProgressBar progressBar;
     private FrameLayout overviewContainer;
     private boolean workspaceOverviewVisible;
     private boolean childOverviewVisible;
+    private boolean bookmarkOverviewVisible;
+    private boolean workspaceBookmarkOverviewVisible;
+    private boolean workspaceSelectionMode;
+    private boolean childSelectionMode;
     private long lastBackPressAt;
     private ValueCallback<Uri[]> pendingFileChooser;
+    private FrameLayout fullscreenContainer;
+    private WebChromeClient.CustomViewCallback fullscreenCallback;
+    private int systemUiBeforeFullscreen;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -92,6 +106,9 @@ public final class ReBrowserActivity extends Activity {
         SystemBackDispatcher.register(this, this::handleSystemBack);
         store = new ReBrowserStore(this);
         browserPreferences = new ReBrowserPreferences(this);
+        applyGlobalOrientationPreference();
+        bookmarkStore = new ReBrowserFavorites(this);
+        bookmarks.addAll(bookmarkStore.load());
         root = createRoot();
         setContentView(root);
 
@@ -102,6 +119,7 @@ public final class ReBrowserActivity extends Activity {
 
         deletePendingProfiles();
         workspaces.addAll(store.loadPersistentWorkspaces());
+        shelvedSecondaryWorkspaces.addAll(store.loadShelvedSecondaryWorkspaces(workspaces));
         if (workspaces.isEmpty()) workspaces.add(newTemporaryWorkspace());
         activeWorkspace = chooseInitialWorkspace();
         activateWorkspace(activeWorkspace);
@@ -119,33 +137,23 @@ public final class ReBrowserActivity extends Activity {
         FrameLayout content = new FrameLayout(this);
         content.setBackgroundColor(Color.rgb(247, 248, 252));
         WindowStyling.apply(this, content);
-        content.setOnApplyWindowInsetsListener((view, insets) -> {
-            view.setPadding(0, insets.getSystemWindowInsetTop(),
-                    0, insets.getSystemWindowInsetBottom());
-            return insets;
-        });
 
         webContainer = new FrameLayout(this);
         FrameLayout.LayoutParams webParams = matchMatch();
-        webParams.topMargin = dp(64);
-        webParams.bottomMargin = dp(58);
+        webParams.topMargin = dp(66);
         content.addView(webContainer, webParams);
 
         browserToolbar = createBrowserToolbar();
         content.addView(browserToolbar, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(64), Gravity.TOP));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(66), Gravity.TOP));
 
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progressBar.setMax(100);
         progressBar.setVisibility(View.GONE);
         FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(2), Gravity.TOP);
-        progressParams.topMargin = dp(62);
+        progressParams.topMargin = dp(64);
         content.addView(progressBar, progressParams);
-
-        childTabStrip = createChildTabStrip();
-        content.addView(childTabStrip, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(58), Gravity.BOTTOM));
 
         overviewContainer = new FrameLayout(this);
         overviewContainer.setVisibility(View.GONE);
@@ -163,7 +171,7 @@ public final class ReBrowserActivity extends Activity {
         toolbar.setBackgroundColor(Color.WHITE);
         toolbar.setElevation(dp(3));
 
-        TextView home = toolbarButton("⌂", "打开当前子 Tab 的主页");
+        TextView home = toolbarButton("⌂", "打开当前子标签页的主页");
         home.setOnClickListener(view -> navigateActiveTab(browserPreferences.homeUrl()));
         toolbar.addView(home, new LinearLayout.LayoutParams(dp(46), dp(50)));
 
@@ -186,10 +194,15 @@ public final class ReBrowserActivity extends Activity {
             return true;
         });
         LinearLayout.LayoutParams addressParams = new LinearLayout.LayoutParams(0, dp(48), 1);
-        addressParams.setMargins(dp(2), 0, dp(7), 0);
+        addressParams.setMargins(dp(2), 0, dp(3), 0);
         toolbar.addView(omnibox, addressParams);
 
-        workspaceCountButton = toolbarButton("1", "打开总标签页总览");
+        TextView addChildTab = toolbarButton("＋", "新建并打开子标签页");
+        addChildTab.setTextSize(27);
+        addChildTab.setOnClickListener(view -> createChildTab(true));
+        toolbar.addView(addChildTab, new LinearLayout.LayoutParams(dp(40), dp(48)));
+
+        workspaceCountButton = toolbarButton("1", "管理总标签页");
         GradientDrawable counter = roundedBackground(Color.TRANSPARENT, dp(8));
         counter.setStroke(dp(2), Color.rgb(68, 73, 82));
         workspaceCountButton.setBackground(counter);
@@ -205,28 +218,28 @@ public final class ReBrowserActivity extends Activity {
         return toolbar;
     }
 
-    private LinearLayout createChildTabStrip() {
-        LinearLayout strip = new LinearLayout(this);
-        strip.setOrientation(LinearLayout.HORIZONTAL);
-        strip.setGravity(Gravity.CENTER_VERTICAL);
-        strip.setPadding(dp(6), dp(4), dp(6), dp(4));
-        strip.setBackgroundColor(Color.WHITE);
-        strip.setElevation(dp(5));
+    private void openWorkspaceBookmark(ReBrowserStore.Workspace workspace, boolean shelved) {
+        if (shelved && !store.restoreSecondary(
+                workspace, workspaces, shelvedSecondaryWorkspaces)) {
+            toast("无法恢复副总标签页");
+            return;
+        }
+        hideOverview();
+        activateWorkspace(workspace);
+    }
 
-        childStripScroller = new HorizontalScrollView(this);
-        childStripScroller.setHorizontalScrollBarEnabled(false);
-        childStripContent = new LinearLayout(this);
-        childStripContent.setOrientation(LinearLayout.HORIZONTAL);
-        childStripContent.setGravity(Gravity.CENTER_VERTICAL);
-        childStripScroller.addView(childStripContent, new HorizontalScrollView.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        strip.addView(childStripScroller, new LinearLayout.LayoutParams(0, dp(50), 1));
-
-        childCountButton = toolbarButton("1", "当前工作区的子 Tab 总览");
-        childCountButton.setOnClickListener(view -> showChildOverview());
-        childCountButton.setBackground(roundedBackground(Color.rgb(233, 229, 249), dp(18)));
-        strip.addView(childCountButton, new LinearLayout.LayoutParams(dp(44), dp(42)));
-        return strip;
+    private void confirmDeleteShelvedWorkspace(ReBrowserStore.Workspace workspace) {
+        new AlertDialog.Builder(this)
+                .setTitle("取消上锁并删除？")
+                .setMessage("此副总标签页已经收起。取消上锁会将“" + workspace.title
+                        + "”移出书签栏；由于它当前已关闭，其子标签页和网站 Profile 将被清除。")
+                .setPositiveButton("移出并删除", (dialog, which) -> {
+                    store.deleteShelvedSecondary(workspace, shelvedSecondaryWorkspaces);
+                    deleteProfileIfPossible(workspace.profileName);
+                    if (workspaceBookmarkOverviewVisible) showWorkspaceBookmarkOverview();
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     private TextView toolbarButton(String text, String description) {
@@ -252,44 +265,8 @@ public final class ReBrowserActivity extends Activity {
         ReBrowserStore.Tab activeTab = activeWorkspace.activeTab();
         workspaceCountButton.setText(Integer.toString(workspaces.size()));
         workspaceCountButton.setContentDescription(
-                workspaces.size() + " 个总标签页；打开总标签页总览");
-        childCountButton.setText(Integer.toString(activeWorkspace.tabs.size()));
-        childCountButton.setContentDescription(activeWorkspace.tabs.size()
-                + " 个子 Tab；打开当前工作区子 Tab 总览");
+                workspaces.size() + " 个总标签页；管理总标签页");
         if (!omnibox.hasFocus() && activeTab != null) omnibox.setText(activeTab.url);
-        rebuildChildTabStrip();
-    }
-
-    private void rebuildChildTabStrip() {
-        childStripContent.removeAllViews();
-        if (activeWorkspace == null) return;
-        for (ReBrowserStore.Tab tab : activeWorkspace.tabs) {
-            TextView chip = new TextView(this);
-            boolean selected = tab.id.equals(activeWorkspace.activeTabId);
-            String title = tab.title == null || tab.title.isBlank() ? "新" : tab.title.trim();
-            chip.setText(title.substring(0, Math.min(1, title.length())));
-            chip.setTextSize(16);
-            chip.setTextColor(selected ? Color.WHITE : Color.rgb(61, 64, 73));
-            chip.setGravity(Gravity.CENTER);
-            chip.setContentDescription((selected ? "当前子 Tab：" : "切换到子 Tab：") + tab.title);
-            chip.setBackground(roundedBackground(
-                    selected ? Color.rgb(91, 70, 180) : Color.rgb(235, 237, 242), dp(20)));
-            chip.setOnClickListener(view -> showTab(tab));
-            chip.setOnLongClickListener(view -> {
-                showChildOverview();
-                return true;
-            });
-            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(dp(42), dp(42));
-            chipParams.setMargins(dp(3), 0, dp(3), 0);
-            childStripContent.addView(chip, chipParams);
-        }
-        TextView add = toolbarButton("＋", "在当前工作区中新建子 Tab");
-        add.setOnClickListener(view -> createChildTab(true));
-        childStripContent.addView(add, new LinearLayout.LayoutParams(dp(46), dp(44)));
-        childStripContent.post(() -> {
-            int activeIndex = Math.max(0, activeWorkspace.tabs.indexOf(activeWorkspace.activeTab()));
-            childStripScroller.smoothScrollTo(Math.max(0, activeIndex * dp(48) - dp(48)), 0);
-        });
     }
 
     private void activateWorkspace(ReBrowserStore.Workspace workspace) {
@@ -350,6 +327,7 @@ public final class ReBrowserActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setSupportMultipleWindows(true);
         settings.setJavaScriptCanOpenWindowsAutomatically(false);
+        settings.setMediaPlaybackRequiresUserGesture(true);
         settings.setSupportZoom(true);
         settings.setBuiltInZoomControls(true);
         settings.setDisplayZoomControls(false);
@@ -396,11 +374,59 @@ public final class ReBrowserActivity extends Activity {
         omnibox.setText(url);
     }
 
+    private void toggleCurrentBookmark() {
+        ReBrowserStore.Tab tab = activeWorkspace == null ? null : activeWorkspace.activeTab();
+        if (tab == null) return;
+        WebView webView = activeWebView();
+        String url = webView == null || webView.getUrl() == null ? tab.url : webView.getUrl();
+        ReBrowserFavorites.Favorite existing = bookmarkStore.findByUrl(bookmarks, url);
+        if (existing == null) {
+            addCurrentBookmark();
+        } else {
+            bookmarkStore.remove(bookmarks, existing);
+            toast("已取消收藏");
+        }
+    }
+
+    private void addCurrentBookmark() {
+        ReBrowserStore.Tab tab = activeWorkspace == null ? null : activeWorkspace.activeTab();
+        if (tab == null) return;
+        WebView webView = activeWebView();
+        String url = webView == null || webView.getUrl() == null ? tab.url : webView.getUrl();
+        String title = webView == null || webView.getTitle() == null
+                ? tab.title : webView.getTitle();
+        ReBrowserFavorites.Favorite existing = bookmarkStore.findByUrl(bookmarks, url);
+        if (existing != null) {
+            toast("当前网页已收藏");
+            return;
+        }
+        ReBrowserFavorites.Favorite added = bookmarkStore.add(bookmarks, title, url);
+        if (added == null) {
+            toast(bookmarks.size() >= ReBrowserFavorites.MAX_FAVORITES
+                    ? "收藏数量已达到上限" : "当前页面不能收藏");
+            return;
+        }
+        if (bookmarkOverviewVisible) showBookmarkOverview();
+        toast("已添加到收藏栏");
+    }
+
+    private void confirmRemoveBookmark(ReBrowserFavorites.Favorite bookmark) {
+        new AlertDialog.Builder(this)
+                .setTitle("删除收藏？")
+                .setMessage(bookmark.title + "\n" + displayUrl(bookmark.url))
+                .setPositiveButton("删除", (dialog, which) -> {
+                    bookmarkStore.remove(bookmarks, bookmark);
+                    if (bookmarkOverviewVisible) showBookmarkOverview();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     private void createChildTab(boolean activate) {
         if (activeWorkspace == null) return;
         ReBrowserStore.Tab tab = store.addTab(activeWorkspace, browserPreferences.homeUrl());
         if (tab == null) {
-            toast("每个工作区最多 50 个子 Tab");
+            toast("每个总标签页最多 50 个子标签页");
             return;
         }
         saveWorkspaceMetadata();
@@ -413,8 +439,9 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void createTemporaryWorkspace() {
-        if (workspaces.size() >= ReBrowserStore.MAX_WORKSPACES) {
-            toast("总标签页数量已达到上限");
+        if (workspaces.size() + shelvedSecondaryWorkspaces.size()
+                >= ReBrowserStore.MAX_WORKSPACES) {
+            toast("当前与书签栏中的总标签页数量已达到上限");
             return;
         }
         ReBrowserStore.Workspace workspace = newTemporaryWorkspace();
@@ -467,30 +494,38 @@ public final class ReBrowserActivity extends Activity {
             JSONObject state = new JSONObject();
             state.put("version", 1);
             state.put("activeWorkspaceId", activeWorkspace == null ? "" : activeWorkspace.id);
-            JSONArray workspaceValues = new JSONArray();
-            for (ReBrowserStore.Workspace workspace : workspaces) {
-                JSONObject workspaceValue = new JSONObject();
-                workspaceValue.put("id", workspace.id);
-                workspaceValue.put("profileName", workspace.profileName);
-                workspaceValue.put("title", workspace.title);
-                workspaceValue.put("level", workspace.level.name());
-                workspaceValue.put("activeTabId", workspace.activeTabId);
-                JSONArray tabValues = new JSONArray();
-                for (ReBrowserStore.Tab tab : workspace.tabs) {
-                    JSONObject tabValue = new JSONObject();
-                    tabValue.put("id", tab.id);
-                    tabValue.put("title", tab.title);
-                    tabValue.put("origin", safeOrigin(tab.url));
-                    tabValues.put(tabValue);
-                }
-                workspaceValue.put("tabs", tabValues);
-                workspaceValues.put(workspaceValue);
-            }
-            state.put("workspaces", workspaceValues);
+            state.put("workspaces", createAdminWorkspaceValues(workspaces));
+            state.put("shelvedSecondaries",
+                    createAdminWorkspaceValues(shelvedSecondaryWorkspaces));
             return state.toString();
         } catch (Exception error) {
             return "failed:state:" + error.getClass().getSimpleName();
         }
+    }
+
+    private JSONArray createAdminWorkspaceValues(
+            List<ReBrowserStore.Workspace> source
+    ) throws Exception {
+        JSONArray workspaceValues = new JSONArray();
+        for (ReBrowserStore.Workspace workspace : source) {
+            JSONObject workspaceValue = new JSONObject();
+            workspaceValue.put("id", workspace.id);
+            workspaceValue.put("profileName", workspace.profileName);
+            workspaceValue.put("title", workspace.title);
+            workspaceValue.put("level", workspace.level.name());
+            workspaceValue.put("activeTabId", workspace.activeTabId);
+            JSONArray tabValues = new JSONArray();
+            for (ReBrowserStore.Tab tab : workspace.tabs) {
+                JSONObject tabValue = new JSONObject();
+                tabValue.put("id", tab.id);
+                tabValue.put("title", tab.title);
+                tabValue.put("origin", safeOrigin(tab.url));
+                tabValues.put(tabValue);
+            }
+            workspaceValue.put("tabs", tabValues);
+            workspaceValues.put(workspaceValue);
+        }
+        return workspaceValues;
     }
 
     private static String safeOrigin(String value) {
@@ -519,7 +554,7 @@ public final class ReBrowserActivity extends Activity {
     private void closeTab(ReBrowserStore.Tab tab) {
         if (activeWorkspace == null || !activeWorkspace.tabs.contains(tab)) return;
         if (activeWorkspace.tabs.size() == 1) {
-            tab.title = "新标签页";
+            tab.title = "新子标签页";
             tab.url = browserPreferences.homeUrl();
             WebView current = tabWebViews.get(tab.id);
             if (current != null) current.loadUrl(tab.url);
@@ -549,23 +584,46 @@ public final class ReBrowserActivity extends Activity {
     private void showWorkspaceSettings() {
         if (activeWorkspace == null || activeWorkspace.level == ReBrowserStore.Level.TEMPORARY) return;
         List<String> actions = new ArrayList<>();
-        actions.add("重命名工作区");
+        actions.add("重命名总标签页");
         if (activeWorkspace.level == ReBrowserStore.Level.SECONDARY) {
-            actions.add("提升为主标签页");
+            actions.add("取消上锁并降级为临时总标签页");
+            actions.add("提升为主总标签页");
         }
         new AlertDialog.Builder(this)
-                .setTitle("工作区设置")
+                .setTitle("总标签页设置")
                 .setItems(actions.toArray(new String[0]), (dialog, which) -> {
-                    if (which == 0) showRenameDialog();
-                    else {
-                        store.promoteToPrimary(activeWorkspace, workspaces);
-                        toast("已提升为主标签页");
-                        updateChromeUi();
-                        if (workspaceOverviewVisible) showWorkspaceOverview();
+                    if (which == 0) {
+                        showRenameDialog();
+                    } else if (which == 1) {
+                        unlockWorkspace(activeWorkspace);
+                    } else {
+                        if (store.promoteToPrimary(activeWorkspace, workspaces, false)) {
+                            toast("已提升为主总标签页");
+                            updateChromeUi();
+                            if (workspaceOverviewVisible) showWorkspaceOverview();
+                        }
                     }
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    private void confirmUnlockWorkspace(ReBrowserStore.Workspace workspace) {
+        new AlertDialog.Builder(this)
+                .setTitle("取消上锁？")
+                .setMessage("此总标签页会从书签栏移除并降级为临时总标签页。"
+                        + "当前可以继续使用，但关闭后将清除其子标签页和网站 Profile。")
+                .setPositiveButton("取消上锁", (dialog, which) -> unlockWorkspace(workspace))
+                .setNegativeButton("保持上锁", null)
+                .show();
+    }
+
+    private void unlockWorkspace(ReBrowserStore.Workspace workspace) {
+        if (!store.unlockToTemporary(workspace, workspaces)) return;
+        toast("已移出书签栏；关闭后将清除此临时总标签页");
+        updateChromeUi();
+        if (workspaceOverviewVisible) showWorkspaceOverview();
+        if (workspaceBookmarkOverviewVisible) showWorkspaceBookmarkOverview();
     }
 
     private void showRenameDialog() {
@@ -578,7 +636,7 @@ public final class ReBrowserActivity extends Activity {
         holder.setPadding(padding, 0, padding, 0);
         holder.addView(input, matchWrap());
         new AlertDialog.Builder(this)
-                .setTitle("重命名工作区")
+                .setTitle("重命名总标签页")
                 .setView(holder)
                 .setPositiveButton("保存", (dialog, which) -> {
                     String value = input.getText().toString().replaceAll("\\s+", " ").trim();
@@ -597,11 +655,17 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void confirmCloseWorkspace(ReBrowserStore.Workspace workspace) {
+        if (workspace.level == ReBrowserStore.Level.PRIMARY) {
+            toast("主总标签页不能关闭");
+            return;
+        }
         String message = workspace.level == ReBrowserStore.Level.TEMPORARY
-                ? "临时总标签页将关闭，其全部子 Tab 和命名 Profile 会被删除。"
-                : "整个总标签页、全部子 Tab 元数据和网站 Profile 数据都将删除。";
+                ? "临时总标签页将关闭即焚，其全部子标签页和命名 Profile 会被删除。"
+                : "副总标签页将从当前列表收起，但会保留在书签栏中，"
+                        + "其子标签页和网站 Profile 不会删除。";
         new AlertDialog.Builder(this)
-                .setTitle("关闭总标签页？")
+                .setTitle(workspace.level == ReBrowserStore.Level.SECONDARY
+                        ? "收起副总标签页？" : "关闭临时总标签页？")
                 .setMessage(message)
                 .setPositiveButton("关闭", (dialog, which) -> closeWorkspace(workspace))
                 .setNegativeButton("取消", null)
@@ -610,13 +674,21 @@ public final class ReBrowserActivity extends Activity {
 
     private void closeWorkspace(ReBrowserStore.Workspace closing) {
         if (!workspaces.contains(closing)) return;
+        if (closing.level == ReBrowserStore.Level.PRIMARY) {
+            toast("主总标签页不能关闭");
+            return;
+        }
         boolean wasActive = closing == activeWorkspace;
         if (wasActive) {
             saveCurrentTabStates();
             destroyTabWebViews();
         }
-        store.removeWorkspace(closing, workspaces);
-        deleteProfileIfPossible(closing.profileName);
+        if (closing.level == ReBrowserStore.Level.SECONDARY) {
+            store.shelfSecondary(closing, workspaces, shelvedSecondaryWorkspaces);
+        } else {
+            store.removeWorkspace(closing, workspaces);
+            deleteProfileIfPossible(closing.profileName);
+        }
         if (workspaces.isEmpty()) workspaces.add(newTemporaryWorkspace());
         if (wasActive) {
             activeWorkspace = chooseInitialWorkspace();
@@ -698,7 +770,6 @@ public final class ReBrowserActivity extends Activity {
 
     private void showUnsupportedProvider() {
         browserToolbar.setVisibility(View.GONE);
-        childTabStrip.setVisibility(View.GONE);
         TextView message = new TextView(this);
         message.setText("当前系统 WebView 不支持 Multi-Profile。\n\n"
                 + "为保护 ReOutlook 的 Default Profile，ReBrowser 已禁用。\n\n"
@@ -716,76 +787,497 @@ public final class ReBrowserActivity extends Activity {
         destroyTabWebViews();
         activeWorkspace = null;
         browserToolbar.setVisibility(View.GONE);
-        childTabStrip.setVisibility(View.GONE);
     }
 
     private void showBrowserMenu(View anchor) {
         if (activeWorkspace == null) return;
         WebView webView = activeWebView();
-        PopupMenu popup = new PopupMenu(this, anchor);
-        popup.getMenu().add(0, 1, 0, "新建总标签页");
-        popup.getMenu().add(0, 2, 1, "新建子 Tab");
-        popup.getMenu().add(0, 3, 2, "子 Tab 总览");
-        popup.getMenu().add(0, 4, 3, "刷新");
-        popup.getMenu().add(0, 5, 4, "后退").setEnabled(webView != null && webView.canGoBack());
-        popup.getMenu().add(0, 6, 5, "前进").setEnabled(webView != null && webView.canGoForward());
-        popup.getMenu().add(0, 7, 6,
-                activeWorkspace.level == ReBrowserStore.Level.TEMPORARY
-                        ? "锁定为副标签页" : "工作区设置");
-        popup.getMenu().add(0, 8, 7, "浏览器设置");
-        popup.getMenu().add(0, 9, 8, "切换到 ReOutlook");
-        popup.getMenu().add(0, 10, 9, "关闭当前子 Tab");
-        popup.getMenu().add(0, 11, 10, "关闭当前总标签页");
-        popup.setOnMenuItemClickListener(item -> {
-            switch (item.getItemId()) {
-                case 1: createTemporaryWorkspace(); return true;
-                case 2: createChildTab(true); return true;
-                case 3: showChildOverview(); return true;
-                case 4:
-                    if (webView != null) webView.reload();
-                    return true;
-                case 5:
-                    if (webView != null && webView.canGoBack()) webView.goBack();
-                    return true;
-                case 6:
-                    if (webView != null && webView.canGoForward()) webView.goForward();
-                    return true;
-                case 7:
-                    if (activeWorkspace.level == ReBrowserStore.Level.TEMPORARY) {
-                        if (store.lockAsSecondary(activeWorkspace, workspaces)) {
-                            toast("已锁定为副标签页");
-                            updateChromeUi();
-                        } else {
-                            toast("常用标签页数量已达到上限");
-                        }
-                    } else {
-                        showWorkspaceSettings();
-                    }
-                    return true;
-                case 8:
-                    startActivity(new Intent(this, ReBrowserSettingsActivity.class));
-                    return true;
-                case 9:
-                    finish();
-                    return true;
-                case 10:
-                    closeTab(activeWorkspace.activeTab());
-                    return true;
-                case 11:
-                    confirmCloseWorkspace();
-                    return true;
-                default:
-                    return false;
-            }
+        ReBrowserStore.Tab tab = activeWorkspace.activeTab();
+        String url = webView == null || webView.getUrl() == null
+                ? tab == null ? "" : tab.url : webView.getUrl();
+        boolean favorite = bookmarkStore.findByUrl(bookmarks, url) != null;
+
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(8), dp(9), dp(8), dp(10));
+        panel.setBackground(roundedBackground(Color.rgb(250, 249, 253), dp(28)));
+
+        int popupWidth = dp(264);
+        PopupWindow popup = new PopupWindow(panel, popupWidth,
+                ViewGroup.LayoutParams.WRAP_CONTENT, true);
+        popup.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+        popup.setOutsideTouchable(true);
+        popup.setElevation(dp(12));
+        popup.setInputMethodMode(PopupWindow.INPUT_METHOD_NOT_NEEDED);
+
+        LinearLayout shortcuts = new LinearLayout(this);
+        shortcuts.setGravity(Gravity.CENTER);
+        shortcuts.addView(menuShortcut(R.drawable.ic_rb_back, "后退",
+                webView != null && webView.canGoBack(), () -> {
+                    popup.dismiss();
+                    if (webView != null) webView.goBack();
+                }));
+        shortcuts.addView(menuShortcut(R.drawable.ic_rb_forward, "前进",
+                webView != null && webView.canGoForward(), () -> {
+                    popup.dismiss();
+                    if (webView != null) webView.goForward();
+                }));
+        shortcuts.addView(menuShortcut(
+                favorite ? R.drawable.ic_rb_star_filled : R.drawable.ic_rb_star_outline,
+                favorite ? "取消收藏" : "收藏当前网页", true, () -> {
+                    popup.dismiss();
+                    toggleCurrentBookmark();
+                }));
+        boolean landscape = getResources().getConfiguration().orientation
+                == Configuration.ORIENTATION_LANDSCAPE;
+        ImageButton orientation = menuShortcut(
+                landscape ? R.drawable.ic_rb_orientation_portrait
+                        : R.drawable.ic_rb_orientation_landscape,
+                landscape ? "切换并锁定竖屏；长按取消方向锁定"
+                        : "切换并锁定横屏；长按取消方向锁定",
+                true,
+                () -> {
+                    popup.dismiss();
+                    toggleOrientationLock();
+                });
+        orientation.setOnLongClickListener(view -> {
+            popup.dismiss();
+            clearOrientationLock();
+            return true;
         });
-        popup.show();
+        shortcuts.addView(orientation);
+        shortcuts.addView(menuShortcut(R.drawable.ic_rb_refresh, "刷新",
+                webView != null, () -> {
+                    popup.dismiss();
+                    reloadActivePage();
+                }));
+        panel.addView(shortcuts, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(60)));
+        panel.addView(menuDivider(), new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+
+        addMenuListItem(panel, R.drawable.ic_rb_star_filled, "收藏夹", () -> {
+            popup.dismiss();
+            showBookmarkOverview();
+        });
+        addMenuListItem(panel, R.drawable.ic_rb_workspaces, "书签栏", () -> {
+            popup.dismiss();
+            showWorkspaceBookmarkOverview();
+        });
+        boolean primary = activeWorkspace.level == ReBrowserStore.Level.PRIMARY;
+        boolean temporaryPromotionAllowed = activeWorkspace.level != ReBrowserStore.Level.TEMPORARY
+                || browserPreferences.forcePrimaryPromotionEnabled();
+        boolean primaryActionEnabled = primary
+                || temporaryPromotionAllowed && store.canPromoteToPrimary(workspaces);
+        addMenuListItem(panel,
+                primary ? R.drawable.ic_rb_primary_cancel : R.drawable.ic_rb_primary_promote,
+                primary ? "取消主标签页" : "提升为主标签页",
+                primaryActionEnabled,
+                () -> {
+                    popup.dismiss();
+                    confirmPrimaryLevelChange(activeWorkspace);
+                });
+        panel.addView(menuDivider(), new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+        addMenuListItem(panel, R.drawable.ic_rb_settings, "浏览器设置", () -> {
+            popup.dismiss();
+            startActivity(new Intent(this, ReBrowserSettingsActivity.class));
+        });
+        addMenuListItem(panel, R.drawable.ic_rb_switch, "切换到 ReOutlook", () -> {
+            popup.dismiss();
+            ModeRouter.openOutlook(this);
+            finish();
+        });
+
+        int xOffset = anchor.getWidth() - popupWidth;
+        int yOffset = -anchor.getHeight() + dp(5);
+        popup.showAsDropDown(anchor, xOffset, yOffset);
+    }
+
+    private ImageButton menuShortcut(
+            int iconResource,
+            String description,
+            boolean enabled,
+            Runnable action
+    ) {
+        ImageButton button = new ImageButton(this);
+        button.setImageResource(iconResource);
+        button.setScaleType(ImageView.ScaleType.CENTER);
+        button.setPadding(dp(10), dp(10), dp(10), dp(10));
+        button.setContentDescription(description);
+        button.setAlpha(enabled ? 1f : 0.3f);
+        button.setEnabled(enabled);
+        GradientDrawable circle = roundedBackground(Color.rgb(239, 237, 243), dp(22));
+        button.setBackground(new RippleDrawable(
+                ColorStateList.valueOf(Color.argb(28, 63, 63, 70)), circle, null));
+        if (enabled) button.setOnClickListener(view -> action.run());
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(44), dp(44));
+        params.setMargins(dp(2), 0, dp(2), 0);
+        button.setLayoutParams(params);
+        return button;
+    }
+
+    private void addMenuListItem(
+            LinearLayout panel,
+            int iconResource,
+            String title,
+            Runnable action
+    ) {
+        addMenuListItem(panel, iconResource, title, true, action);
+    }
+
+    private void addMenuListItem(
+            LinearLayout panel,
+            int iconResource,
+            String title,
+            boolean enabled,
+            Runnable action
+    ) {
+        TextView row = new TextView(this);
+        row.setText(title);
+        row.setTextSize(17);
+        row.setTextColor(Color.rgb(39, 38, 43));
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(14), 0, dp(12), 0);
+        row.setCompoundDrawablePadding(dp(18));
+        row.setCompoundDrawablesWithIntrinsicBounds(iconResource, 0, 0, 0);
+        row.setBackgroundResource(android.R.drawable.list_selector_background);
+        row.setAlpha(enabled ? 1f : 0.32f);
+        row.setEnabled(enabled);
+        if (enabled) row.setOnClickListener(view -> action.run());
+        panel.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(58)));
+    }
+
+    private View menuDivider() {
+        View divider = new View(this);
+        divider.setBackgroundColor(Color.rgb(224, 222, 228));
+        return divider;
+    }
+
+    private void reloadActivePage() {
+        WebView webView = activeWebView();
+        if (webView == null) return;
+        progressBar.setProgress(5);
+        progressBar.setVisibility(View.VISIBLE);
+        webView.post(() -> {
+            if (webView != activeWebView()) return;
+            webView.stopLoading();
+            webView.reload();
+        });
+    }
+
+    private void toggleOrientationLock() {
+        boolean landscape = getResources().getConfiguration().orientation
+                == Configuration.ORIENTATION_LANDSCAPE;
+        browserPreferences.setGlobalOrientation(landscape
+                ? ReBrowserPreferences.ORIENTATION_PORTRAIT
+                : ReBrowserPreferences.ORIENTATION_LANDSCAPE);
+        applyGlobalOrientationPreference();
+        toast(landscape ? "已锁定竖屏" : "已锁定横屏；横屏朝向跟随传感器");
+    }
+
+    private void clearOrientationLock() {
+        browserPreferences.setGlobalOrientation(ReBrowserPreferences.ORIENTATION_UNLOCKED);
+        applyGlobalOrientationPreference();
+        toast("已取消 ReBrowser 方向锁定");
+    }
+
+    private void applyGlobalOrientationPreference() {
+        String mode = browserPreferences.globalOrientation();
+        if (ReBrowserPreferences.ORIENTATION_LANDSCAPE.equals(mode)) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+        } else if (ReBrowserPreferences.ORIENTATION_UNLOCKED.equals(mode)) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        } else {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+        }
+    }
+
+    private int effectiveVideoOrientation() {
+        String mode;
+        if (browserPreferences.videoOrientationOverrideEnabled()) {
+            mode = browserPreferences.videoOrientation();
+        } else {
+            mode = ReBrowserPreferences.ORIENTATION_UNLOCKED.equals(
+                    browserPreferences.globalOrientation())
+                    ? ReBrowserPreferences.VIDEO_ORIENTATION_AUTO
+                    : ReBrowserPreferences.ORIENTATION_LANDSCAPE;
+        }
+        if (ReBrowserPreferences.VIDEO_ORIENTATION_AUTO.equals(mode)) {
+            return ActivityInfo.SCREEN_ORIENTATION_SENSOR;
+        }
+        if (ReBrowserPreferences.ORIENTATION_PORTRAIT.equals(mode)) {
+            return ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
+        }
+        return ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+    }
+
+    private void showFullscreenContent(
+            View customView,
+            WebChromeClient.CustomViewCallback callback
+    ) {
+        if (fullscreenContainer != null) {
+            callback.onCustomViewHidden();
+            return;
+        }
+        systemUiBeforeFullscreen = getWindow().getDecorView().getSystemUiVisibility();
+        fullscreenCallback = callback;
+        fullscreenContainer = new FrameLayout(this);
+        fullscreenContainer.setBackgroundColor(Color.BLACK);
+        if (customView.getParent() instanceof ViewGroup) {
+            ((ViewGroup) customView.getParent()).removeView(customView);
+        }
+        fullscreenContainer.addView(customView, matchMatch());
+        ViewGroup content = findViewById(android.R.id.content);
+        content.addView(fullscreenContainer, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        setFullscreenSystemUi(true);
+        setRequestedOrientation(effectiveVideoOrientation());
+    }
+
+    private void hideFullscreenContent() {
+        if (fullscreenContainer == null) return;
+        ViewGroup parent = (ViewGroup) fullscreenContainer.getParent();
+        if (parent != null) parent.removeView(fullscreenContainer);
+        fullscreenContainer.removeAllViews();
+        fullscreenContainer = null;
+        WebChromeClient.CustomViewCallback callback = fullscreenCallback;
+        fullscreenCallback = null;
+        applyGlobalOrientationPreference();
+        setFullscreenSystemUi(false);
+        if (callback != null) callback.onCustomViewHidden();
+    }
+
+    private void setFullscreenSystemUi(boolean fullscreen) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller != null) {
+                if (fullscreen) {
+                    controller.setSystemBarsBehavior(
+                            WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                    controller.hide(WindowInsets.Type.systemBars());
+                } else {
+                    controller.show(WindowInsets.Type.systemBars());
+                }
+            }
+        } else if (fullscreen) {
+            getWindow().getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+        } else {
+            getWindow().getDecorView().setSystemUiVisibility(systemUiBeforeFullscreen);
+        }
+        if (!fullscreen && root != null) WindowStyling.apply(this, root);
+    }
+
+    private void confirmPrimaryLevelChange(ReBrowserStore.Workspace workspace) {
+        if (workspace == null || workspace != activeWorkspace || !workspaces.contains(workspace)) {
+            return;
+        }
+        if (workspace.level == ReBrowserStore.Level.TEMPORARY
+                && !browserPreferences.forcePrimaryPromotionEnabled()) return;
+        if (workspace.level == ReBrowserStore.Level.PRIMARY) {
+            new AlertDialog.Builder(this)
+                    .setTitle("取消主标签页？")
+                    .setMessage("此总标签页将降级为副总标签页并登记到书签栏；"
+                            + "它仍会保留全部子标签页和原命名 Profile。")
+                    .setPositiveButton("降级为副标签页", (dialog, which) -> {
+                        if (store.demotePrimaryToSecondary(workspace, workspaces)) {
+                            toast("已降级为副总标签页");
+                            refreshLifecycleUi();
+                        }
+                    })
+                    .setNegativeButton("保持为主标签页", null)
+                    .show();
+            return;
+        }
+
+        boolean skipsSecondary = workspace.level == ReBrowserStore.Level.TEMPORARY;
+        new AlertDialog.Builder(this)
+                .setTitle("提升为主标签页？")
+                .setMessage(skipsSecondary
+                        ? "已允许强行提升：此临时总标签页将跳过副级别直接成为主总标签页。"
+                                + "其他主总标签页不受影响。"
+                        : "此副总标签页将成为主总标签页；其他主总标签页不受影响。")
+                .setPositiveButton("提升", (dialog, which) -> {
+                    boolean allowTemporary = browserPreferences.forcePrimaryPromotionEnabled();
+                    if (store.promoteToPrimary(workspace, workspaces, allowTemporary)) {
+                        toast("已提升为主总标签页");
+                        refreshLifecycleUi();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void refreshLifecycleUi() {
+        updateChromeUi();
+        if (workspaceOverviewVisible) showWorkspaceOverview();
+        if (workspaceBookmarkOverviewVisible) showWorkspaceBookmarkOverview();
+    }
+
+    private LinearLayout createWorkspaceBatchBar() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.VERTICAL);
+        bar.setPadding(dp(12), dp(10), dp(12), dp(8));
+        boolean primarySelected = selectedWorkspacesContainPrimary();
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setGravity(Gravity.CENTER_VERTICAL);
+        boolean hasTemporary = false;
+        boolean hasSecondary = false;
+        for (ReBrowserStore.Workspace workspace : selectedWorkspaces()) {
+            if (workspace.level == ReBrowserStore.Level.TEMPORARY) hasTemporary = true;
+            if (workspace.level == ReBrowserStore.Level.SECONDARY) hasSecondary = true;
+        }
+        actions.addView(batchButton("上锁", !primarySelected && hasTemporary,
+                this::batchLockSelectedWorkspaces));
+        actions.addView(batchButton("解锁", !primarySelected && hasSecondary,
+                this::batchUnlockSelectedWorkspaces));
+        actions.addView(batchButton("关闭", !primarySelected && !selectedWorkspaceIds.isEmpty(),
+                this::confirmBatchCloseWorkspaces));
+        bar.addView(actions, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
+
+        if (primarySelected) {
+            TextView warning = new TextView(this);
+            warning.setText("已选择主总标签页：上锁、解锁和关闭操作暂时禁用");
+            warning.setTextSize(11);
+            warning.setTextColor(Color.rgb(171, 72, 55));
+            warning.setGravity(Gravity.CENTER);
+            bar.addView(warning, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
+        }
+        return bar;
+    }
+
+    private TextView batchButton(String text, boolean enabled, Runnable action) {
+        TextView button = new TextView(this);
+        button.setText(text);
+        button.setTextSize(14);
+        button.setTextColor(enabled ? Color.rgb(72, 56, 145) : Color.rgb(150, 152, 158));
+        button.setGravity(Gravity.CENTER);
+        button.setAlpha(enabled ? 1f : 0.45f);
+        button.setBackground(roundedBackground(
+                enabled ? Color.rgb(235, 231, 250) : Color.rgb(235, 236, 239), dp(18)));
+        if (enabled) button.setOnClickListener(view -> action.run());
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(44), 1);
+        params.setMargins(dp(4), 0, dp(4), 0);
+        button.setLayoutParams(params);
+        return button;
+    }
+
+    private List<ReBrowserStore.Workspace> selectedWorkspaces() {
+        List<ReBrowserStore.Workspace> selected = new ArrayList<>();
+        for (ReBrowserStore.Workspace workspace : workspaces) {
+            if (selectedWorkspaceIds.contains(workspace.id)) selected.add(workspace);
+        }
+        return selected;
+    }
+
+    private boolean selectedWorkspacesContainPrimary() {
+        for (ReBrowserStore.Workspace workspace : selectedWorkspaces()) {
+            if (workspace.level == ReBrowserStore.Level.PRIMARY) return true;
+        }
+        return false;
+    }
+
+    private void toggleWorkspaceSelection(ReBrowserStore.Workspace workspace) {
+        workspaceSelectionMode = true;
+        if (!selectedWorkspaceIds.add(workspace.id)) selectedWorkspaceIds.remove(workspace.id);
+        if (selectedWorkspaceIds.isEmpty()) workspaceSelectionMode = false;
+        showWorkspaceOverview();
+    }
+
+    private void startWorkspaceSelection(ReBrowserStore.Workspace workspace) {
+        workspaceSelectionMode = true;
+        selectedWorkspaceIds.add(workspace.id);
+        showWorkspaceOverview();
+    }
+
+    private void exitWorkspaceSelection() {
+        workspaceSelectionMode = false;
+        selectedWorkspaceIds.clear();
+        showWorkspaceOverview();
+    }
+
+    private void batchLockSelectedWorkspaces() {
+        if (selectedWorkspacesContainPrimary()) return;
+        int changed = 0;
+        for (ReBrowserStore.Workspace workspace : selectedWorkspaces()) {
+            if (store.lockAsSecondary(workspace, workspaces)) changed++;
+        }
+        workspaceSelectionMode = false;
+        selectedWorkspaceIds.clear();
+        toast("已上锁 " + changed + " 个总标签页");
+        updateChromeUi();
+        showWorkspaceOverview();
+    }
+
+    private void batchUnlockSelectedWorkspaces() {
+        if (selectedWorkspacesContainPrimary()) return;
+        int changed = 0;
+        for (ReBrowserStore.Workspace workspace : selectedWorkspaces()) {
+            if (store.unlockToTemporary(workspace, workspaces)) changed++;
+        }
+        workspaceSelectionMode = false;
+        selectedWorkspaceIds.clear();
+        toast("已解锁 " + changed + " 个总标签页");
+        updateChromeUi();
+        showWorkspaceOverview();
+    }
+
+    private void confirmBatchCloseWorkspaces() {
+        if (selectedWorkspacesContainPrimary() || selectedWorkspaceIds.isEmpty()) return;
+        new AlertDialog.Builder(this)
+                .setTitle("关闭选中的总标签页？")
+                .setMessage("临时总标签页会被清除；副总标签页会收起并保留在书签栏。")
+                .setPositiveButton("关闭", (dialog, which) -> batchCloseSelectedWorkspaces())
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void batchCloseSelectedWorkspaces() {
+        List<ReBrowserStore.Workspace> closing = selectedWorkspaces();
+        if (closing.isEmpty() || selectedWorkspacesContainPrimary()) return;
+        boolean activeClosing = closing.contains(activeWorkspace);
+        if (activeClosing) {
+            saveCurrentTabStates();
+            destroyTabWebViews();
+        }
+        for (ReBrowserStore.Workspace workspace : closing) {
+            if (workspace.level == ReBrowserStore.Level.SECONDARY) {
+                store.shelfSecondary(workspace, workspaces, shelvedSecondaryWorkspaces);
+            } else {
+                store.removeWorkspace(workspace, workspaces);
+                deleteProfileIfPossible(workspace.profileName);
+            }
+        }
+        if (workspaces.isEmpty()) workspaces.add(newTemporaryWorkspace());
+        if (activeClosing) {
+            activeWorkspace = chooseInitialWorkspace();
+            activateWorkspace(activeWorkspace);
+        }
+        workspaceSelectionMode = false;
+        selectedWorkspaceIds.clear();
+        updateChromeUi();
+        showWorkspaceOverview();
     }
 
     private void showWorkspaceOverview() {
         if (activeWorkspace == null) return;
+        childSelectionMode = false;
+        selectedChildTabIds.clear();
         saveCurrentTabStates();
         workspaceOverviewVisible = true;
         childOverviewVisible = false;
+        bookmarkOverviewVisible = false;
+        workspaceBookmarkOverviewVisible = false;
         setBrowserContentVisible(false);
         overviewContainer.removeAllViews();
         overviewContainer.addView(createWorkspaceOverviewPage(), matchMatch());
@@ -795,8 +1287,15 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private View createWorkspaceOverviewPage() {
-        LinearLayout page = overviewPage("总标签页", workspaces.size() + " 个独立工作区",
-                this::createTemporaryWorkspace);
+        LinearLayout page = overviewPage("总标签页",
+                workspaceSelectionMode
+                        ? "已选择 " + selectedWorkspaceIds.size() + " 个"
+                        : workspaces.size() + " 个独立浏览空间",
+                workspaceSelectionMode ? null : this::createTemporaryWorkspace,
+                workspaceSelectionMode ? this::exitWorkspaceSelection : this::hideOverview,
+                workspaceSelectionMode ? "退出多选" : "返回网页");
+        LinearLayout body = (LinearLayout) ((ScrollView) page.getChildAt(1)).getChildAt(0);
+        if (workspaceSelectionMode) body.addView(createWorkspaceBatchBar());
         GridLayout grid = new GridLayout(this);
         grid.setColumnCount(2);
         grid.setPadding(dp(8), dp(4), dp(8), dp(28));
@@ -806,48 +1305,78 @@ public final class ReBrowserActivity extends Activity {
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(dp(14), dp(12), dp(12), dp(10));
-            card.setElevation(workspace == activeWorkspace ? dp(6) : dp(2));
+            boolean selected = selectedWorkspaceIds.contains(workspace.id);
+            card.setElevation(selected || workspace == activeWorkspace ? dp(6) : dp(2));
             GradientDrawable background = roundedBackground(
-                    workspace == activeWorkspace ? Color.rgb(235, 231, 250) : Color.WHITE,
+                    selected ? Color.rgb(224, 218, 249)
+                            : workspace == activeWorkspace
+                                    ? Color.rgb(235, 231, 250) : Color.WHITE,
                     dp(18));
-            if (workspace == activeWorkspace) {
-                background.setStroke(dp(2), Color.rgb(91, 70, 180));
+            if (selected || workspace == activeWorkspace) {
+                background.setStroke(dp(2), selected
+                        ? Color.rgb(74, 52, 166) : Color.rgb(91, 70, 180));
             }
             card.setBackground(background);
             card.setOnClickListener(view -> {
-                hideOverview();
-                activateWorkspace(workspace);
+                if (workspaceSelectionMode) {
+                    toggleWorkspaceSelection(workspace);
+                } else {
+                    activateWorkspace(workspace);
+                    showChildOverview();
+                }
             });
             card.setOnLongClickListener(view -> {
-                hideOverview();
-                activateWorkspace(workspace);
-                if (workspace.level == ReBrowserStore.Level.TEMPORARY) {
-                    if (store.lockAsSecondary(workspace, workspaces)) {
-                        toast("已锁定为副标签页");
-                    }
-                } else {
-                    showWorkspaceSettings();
-                }
+                startWorkspaceSelection(workspace);
                 return true;
             });
 
             LinearLayout heading = new LinearLayout(this);
             heading.setGravity(Gravity.CENTER_VERTICAL);
             TextView badge = new TextView(this);
-            badge.setText(levelShortLabel(workspace.level));
+            badge.setText(selected ? "✓" : levelShortLabel(workspace.level));
             badge.setTextSize(11);
             badge.setTextColor(Color.WHITE);
             badge.setGravity(Gravity.CENTER);
-            badge.setBackground(roundedBackground(levelColor(workspace.level), dp(10)));
+            badge.setBackground(roundedBackground(
+                    selected ? Color.rgb(74, 52, 166) : levelColor(workspace.level), dp(10)));
             heading.addView(badge, new LinearLayout.LayoutParams(dp(52), dp(24)));
             View headingSpace = new View(this);
             heading.addView(headingSpace, new LinearLayout.LayoutParams(0, 1, 1));
-            TextView close = toolbarButton("×", "关闭总标签页 " + workspace.title);
-            close.setOnClickListener(view -> {
-                view.getParent().requestDisallowInterceptTouchEvent(true);
-                confirmCloseWorkspace(workspace);
-            });
-            heading.addView(close, new LinearLayout.LayoutParams(dp(36), dp(36)));
+            boolean primary = workspace.level == ReBrowserStore.Level.PRIMARY;
+            if (!workspaceSelectionMode && !primary) {
+                boolean temporary = workspace.level == ReBrowserStore.Level.TEMPORARY;
+                TextView lock = toolbarButton("",
+                        temporary ? "上锁为副总标签页" : "取消上锁");
+                lock.setCompoundDrawablesWithIntrinsicBounds(0,
+                        temporary ? R.drawable.ic_rb_lock_open
+                                : R.drawable.ic_rb_lock_closed,
+                        0, 0);
+                lock.setOnClickListener(view -> {
+                    if (temporary) {
+                        if (store.lockAsSecondary(workspace, workspaces)) {
+                            toast("已锁定为副总标签页并加入书签栏");
+                            updateChromeUi();
+                            showWorkspaceOverview();
+                        }
+                    } else {
+                        confirmUnlockWorkspace(workspace);
+                    }
+                });
+                heading.addView(lock, new LinearLayout.LayoutParams(dp(44), dp(34)));
+            }
+            if (!workspaceSelectionMode) {
+                TextView close = toolbarButton(primary ? "◆" : "×",
+                        primary ? "主总标签页不可关闭" : "关闭总标签页 " + workspace.title);
+                if (primary) {
+                    close.setTextColor(Color.rgb(43, 125, 86));
+                } else {
+                    close.setOnClickListener(view -> {
+                        view.getParent().requestDisallowInterceptTouchEvent(true);
+                        confirmCloseWorkspace(workspace);
+                    });
+                }
+                heading.addView(close, new LinearLayout.LayoutParams(dp(36), dp(36)));
+            }
             card.addView(heading, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, dp(38)));
 
@@ -862,7 +1391,7 @@ public final class ReBrowserActivity extends Activity {
 
             ReBrowserStore.Tab tab = workspace.activeTab();
             TextView active = new TextView(this);
-            active.setText(tab == null ? "空工作区" : tab.title);
+            active.setText(tab == null ? "没有子标签页" : tab.title);
             active.setTextSize(12);
             active.setTextColor(Color.rgb(92, 98, 108));
             active.setMaxLines(2);
@@ -870,7 +1399,7 @@ public final class ReBrowserActivity extends Activity {
                     ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
 
             TextView count = new TextView(this);
-            count.setText(workspace.tabs.size() + " 个子 Tab");
+            count.setText(workspace.tabs.size() + " 个子标签页  ›");
             count.setTextSize(12);
             count.setTextColor(Color.rgb(91, 70, 180));
             count.setGravity(Gravity.CENTER_VERTICAL);
@@ -883,15 +1412,71 @@ public final class ReBrowserActivity extends Activity {
             cardParams.setMargins(dp(6), dp(7), dp(6), dp(7));
             grid.addView(card, cardParams);
         }
-        ((LinearLayout) ((ScrollView) page.getChildAt(1)).getChildAt(0)).addView(grid);
+        body.addView(grid);
         return page;
+    }
+
+    private LinearLayout createChildBatchBar() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(dp(12), dp(10), dp(12), dp(8));
+        bar.addView(batchButton("关闭选中子标签页", !selectedChildTabIds.isEmpty(),
+                this::confirmBatchCloseChildTabs));
+        return bar;
+    }
+
+    private void toggleChildTabSelection(ReBrowserStore.Tab tab) {
+        childSelectionMode = true;
+        if (!selectedChildTabIds.add(tab.id)) selectedChildTabIds.remove(tab.id);
+        if (selectedChildTabIds.isEmpty()) childSelectionMode = false;
+        showChildOverview();
+    }
+
+    private void startChildTabSelection(ReBrowserStore.Tab tab) {
+        childSelectionMode = true;
+        selectedChildTabIds.add(tab.id);
+        showChildOverview();
+    }
+
+    private void exitChildSelection() {
+        childSelectionMode = false;
+        selectedChildTabIds.clear();
+        showChildOverview();
+    }
+
+    private void confirmBatchCloseChildTabs() {
+        if (selectedChildTabIds.isEmpty()) return;
+        new AlertDialog.Builder(this)
+                .setTitle("关闭选中的子标签页？")
+                .setMessage("关闭子标签页不会删除总标签页的网站 Profile。")
+                .setPositiveButton("关闭", (dialog, which) -> batchCloseSelectedChildTabs())
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void batchCloseSelectedChildTabs() {
+        if (activeWorkspace == null) return;
+        List<ReBrowserStore.Tab> closing = new ArrayList<>();
+        for (ReBrowserStore.Tab tab : activeWorkspace.tabs) {
+            if (selectedChildTabIds.contains(tab.id)) closing.add(tab);
+        }
+        childOverviewVisible = false;
+        for (ReBrowserStore.Tab tab : closing) closeTab(tab);
+        childSelectionMode = false;
+        selectedChildTabIds.clear();
+        childOverviewVisible = true;
+        showChildOverview();
     }
 
     private void showChildOverview() {
         if (activeWorkspace == null) return;
+        workspaceSelectionMode = false;
+        selectedWorkspaceIds.clear();
         saveCurrentTabStates();
         childOverviewVisible = true;
         workspaceOverviewVisible = false;
+        bookmarkOverviewVisible = false;
+        workspaceBookmarkOverviewVisible = false;
         setBrowserContentVisible(false);
         overviewContainer.removeAllViews();
         overviewContainer.addView(createChildOverviewPage(), matchMatch());
@@ -901,8 +1486,15 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private View createChildOverviewPage() {
-        LinearLayout page = overviewPage("子 Tab", activeWorkspace.title,
-                () -> createChildTab(true));
+        LinearLayout page = overviewPage("子标签页",
+                childSelectionMode
+                        ? "已选择 " + selectedChildTabIds.size() + " 个"
+                        : "总标签页 · " + activeWorkspace.title,
+                childSelectionMode ? null : () -> createChildTab(true),
+                childSelectionMode ? this::exitChildSelection : this::showWorkspaceOverview,
+                childSelectionMode ? "退出多选" : "返回总标签页");
+        LinearLayout body = (LinearLayout) ((ScrollView) page.getChildAt(1)).getChildAt(0);
+        if (childSelectionMode) body.addView(createChildBatchBar());
         GridLayout grid = new GridLayout(this);
         grid.setColumnCount(2);
         grid.setPadding(dp(8), dp(4), dp(8), dp(28));
@@ -912,33 +1504,47 @@ public final class ReBrowserActivity extends Activity {
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(dp(14), dp(12), dp(10), dp(10));
-            card.setElevation(tab.id.equals(activeWorkspace.activeTabId) ? dp(6) : dp(2));
+            boolean selected = selectedChildTabIds.contains(tab.id);
+            boolean active = tab.id.equals(activeWorkspace.activeTabId);
+            card.setElevation(selected || active ? dp(6) : dp(2));
             GradientDrawable background = roundedBackground(
-                    tab.id.equals(activeWorkspace.activeTabId)
-                            ? Color.rgb(235, 231, 250) : Color.WHITE,
+                    selected ? Color.rgb(224, 218, 249)
+                            : active ? Color.rgb(235, 231, 250) : Color.WHITE,
                     dp(18));
-            if (tab.id.equals(activeWorkspace.activeTabId)) {
-                background.setStroke(dp(2), Color.rgb(91, 70, 180));
+            if (selected || active) {
+                background.setStroke(dp(2), selected
+                        ? Color.rgb(74, 52, 166) : Color.rgb(91, 70, 180));
             }
             card.setBackground(background);
             card.setOnClickListener(view -> {
-                hideOverview();
-                showTab(tab);
+                if (childSelectionMode) {
+                    toggleChildTabSelection(tab);
+                } else {
+                    hideOverview();
+                    showTab(tab);
+                }
+            });
+            card.setOnLongClickListener(view -> {
+                startChildTabSelection(tab);
+                return true;
             });
 
             LinearLayout heading = new LinearLayout(this);
             heading.setGravity(Gravity.CENTER_VERTICAL);
             TextView icon = new TextView(this);
             String titleText = tab.title == null || tab.title.isBlank() ? "新" : tab.title.trim();
-            icon.setText(titleText.substring(0, Math.min(1, titleText.length())));
+            icon.setText(selected ? "✓"
+                    : titleText.substring(0, Math.min(1, titleText.length())));
             icon.setTextColor(Color.WHITE);
             icon.setGravity(Gravity.CENTER);
             icon.setBackground(roundedBackground(Color.rgb(91, 70, 180), dp(16)));
             heading.addView(icon, new LinearLayout.LayoutParams(dp(32), dp(32)));
             heading.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
-            TextView close = toolbarButton("×", "关闭子 Tab " + tab.title);
-            close.setOnClickListener(view -> closeTab(tab));
-            heading.addView(close, new LinearLayout.LayoutParams(dp(36), dp(36)));
+            if (!childSelectionMode) {
+                TextView close = toolbarButton("×", "关闭子标签页 " + tab.title);
+                close.setOnClickListener(view -> closeTab(tab));
+                heading.addView(close, new LinearLayout.LayoutParams(dp(36), dp(36)));
+            }
             card.addView(heading, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, dp(40)));
 
@@ -965,11 +1571,214 @@ public final class ReBrowserActivity extends Activity {
             cardParams.setMargins(dp(6), dp(7), dp(6), dp(7));
             grid.addView(card, cardParams);
         }
-        ((LinearLayout) ((ScrollView) page.getChildAt(1)).getChildAt(0)).addView(grid);
+        body.addView(grid);
         return page;
     }
 
-    private LinearLayout overviewPage(String title, String subtitle, Runnable addAction) {
+    private void showBookmarkOverview() {
+        if (activeWorkspace == null) return;
+        saveCurrentTabStates();
+        bookmarkOverviewVisible = true;
+        workspaceOverviewVisible = false;
+        childOverviewVisible = false;
+        workspaceBookmarkOverviewVisible = false;
+        setBrowserContentVisible(false);
+        overviewContainer.removeAllViews();
+        overviewContainer.addView(createBookmarkOverviewPage(), matchMatch());
+        overviewContainer.setAlpha(0f);
+        overviewContainer.setVisibility(View.VISIBLE);
+        overviewContainer.animate().alpha(1f).setDuration(160).start();
+    }
+
+    private View createBookmarkOverviewPage() {
+        LinearLayout page = overviewPage("收藏", bookmarks.size() + " 个收藏网址",
+                this::addCurrentBookmark, this::hideOverview, "返回网页");
+        LinearLayout body = (LinearLayout) ((ScrollView) page.getChildAt(1)).getChildAt(0);
+        if (bookmarks.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("还没有收藏网址\n\n点击右上角＋收藏当前网页");
+            empty.setTextSize(16);
+            empty.setTextColor(Color.rgb(92, 98, 108));
+            empty.setGravity(Gravity.CENTER);
+            empty.setPadding(dp(24), dp(96), dp(24), dp(48));
+            body.addView(empty, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            return page;
+        }
+
+        GridLayout grid = new GridLayout(this);
+        grid.setColumnCount(2);
+        grid.setPadding(dp(8), dp(8), dp(8), dp(28));
+        int cardWidth = Math.max(dp(150),
+                (getResources().getDisplayMetrics().widthPixels - dp(40)) / 2);
+        for (ReBrowserFavorites.Favorite bookmark : new ArrayList<>(bookmarks)) {
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setPadding(dp(14), dp(12), dp(10), dp(12));
+            card.setElevation(dp(2));
+            card.setBackground(roundedBackground(Color.WHITE, dp(18)));
+            card.setOnClickListener(view -> {
+                hideOverview();
+                navigateActiveTab(bookmark.url);
+            });
+
+            LinearLayout heading = new LinearLayout(this);
+            heading.setGravity(Gravity.CENTER_VERTICAL);
+            TextView icon = new TextView(this);
+            icon.setText("★");
+            icon.setTextSize(17);
+            icon.setTextColor(Color.WHITE);
+            icon.setGravity(Gravity.CENTER);
+            icon.setBackground(roundedBackground(Color.rgb(242, 167, 48), dp(16)));
+            heading.addView(icon, new LinearLayout.LayoutParams(dp(32), dp(32)));
+            heading.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+            TextView remove = toolbarButton("×", "删除收藏 " + bookmark.title);
+            remove.setOnClickListener(view -> confirmRemoveBookmark(bookmark));
+            heading.addView(remove, new LinearLayout.LayoutParams(dp(36), dp(36)));
+            card.addView(heading, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
+
+            TextView titleView = new TextView(this);
+            titleView.setText(bookmark.title);
+            titleView.setTextSize(16);
+            titleView.setTextColor(Color.rgb(32, 37, 46));
+            titleView.setTypeface(null, android.graphics.Typeface.BOLD);
+            titleView.setMaxLines(3);
+            card.addView(titleView, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+            TextView urlView = new TextView(this);
+            urlView.setText(displayUrl(bookmark.url));
+            urlView.setTextSize(11);
+            urlView.setTextColor(Color.rgb(100, 106, 116));
+            urlView.setSingleLine(true);
+            card.addView(urlView, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
+
+            GridLayout.LayoutParams cardParams = new GridLayout.LayoutParams();
+            cardParams.width = cardWidth;
+            cardParams.height = dp(190);
+            cardParams.setMargins(dp(6), dp(7), dp(6), dp(7));
+            grid.addView(card, cardParams);
+        }
+        body.addView(grid);
+        return page;
+    }
+
+    private void showWorkspaceBookmarkOverview() {
+        if (activeWorkspace == null) return;
+        saveCurrentTabStates();
+        workspaceBookmarkOverviewVisible = true;
+        bookmarkOverviewVisible = false;
+        workspaceOverviewVisible = false;
+        childOverviewVisible = false;
+        setBrowserContentVisible(false);
+        overviewContainer.removeAllViews();
+        overviewContainer.addView(createWorkspaceBookmarkOverviewPage(), matchMatch());
+        overviewContainer.setAlpha(0f);
+        overviewContainer.setVisibility(View.VISIBLE);
+        overviewContainer.animate().alpha(1f).setDuration(160).start();
+    }
+
+    private View createWorkspaceBookmarkOverviewPage() {
+        List<ReBrowserStore.Workspace> secondaryWorkspaces = new ArrayList<>();
+        for (ReBrowserStore.Workspace workspace : workspaces) {
+            if (workspace.level == ReBrowserStore.Level.SECONDARY) {
+                secondaryWorkspaces.add(workspace);
+            }
+        }
+        secondaryWorkspaces.addAll(shelvedSecondaryWorkspaces);
+        LinearLayout page = overviewPage("书签栏",
+                secondaryWorkspaces.size() + " 个副总标签页",
+                null, this::hideOverview, "返回网页");
+        LinearLayout body = (LinearLayout) ((ScrollView) page.getChildAt(1)).getChildAt(0);
+        if (secondaryWorkspaces.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("书签栏中还没有副总标签页\n\n"
+                    + "请在总标签页管理界面锁定一个临时总标签页");
+            empty.setTextSize(16);
+            empty.setTextColor(Color.rgb(92, 98, 108));
+            empty.setGravity(Gravity.CENTER);
+            empty.setPadding(dp(24), dp(96), dp(24), dp(48));
+            body.addView(empty, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            return page;
+        }
+
+        GridLayout grid = new GridLayout(this);
+        grid.setColumnCount(2);
+        grid.setPadding(dp(8), dp(8), dp(8), dp(28));
+        int cardWidth = Math.max(dp(150),
+                (getResources().getDisplayMetrics().widthPixels - dp(40)) / 2);
+        for (ReBrowserStore.Workspace workspace : secondaryWorkspaces) {
+            boolean shelved = shelvedSecondaryWorkspaces.contains(workspace);
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setPadding(dp(14), dp(12), dp(10), dp(12));
+            card.setElevation(dp(2));
+            card.setBackground(roundedBackground(
+                    shelved ? Color.WHITE : Color.rgb(235, 239, 251), dp(18)));
+            card.setOnClickListener(view -> openWorkspaceBookmark(workspace, shelved));
+
+            LinearLayout heading = new LinearLayout(this);
+            heading.setGravity(Gravity.CENTER_VERTICAL);
+            TextView badge = new TextView(this);
+            badge.setText(shelved ? "已收起" : "已打开");
+            badge.setTextSize(11);
+            badge.setTextColor(Color.WHITE);
+            badge.setGravity(Gravity.CENTER);
+            badge.setBackground(roundedBackground(
+                    shelved ? Color.rgb(105, 105, 118) : Color.rgb(70, 101, 176), dp(11)));
+            heading.addView(badge, new LinearLayout.LayoutParams(dp(58), dp(25)));
+            heading.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
+            TextView action = toolbarButton(shelved ? "×" : "",
+                    shelved ? "从书签栏移除" : "取消上锁");
+            action.setTextSize(19);
+            if (!shelved) {
+                action.setCompoundDrawablesWithIntrinsicBounds(
+                        0, R.drawable.ic_rb_lock_open, 0, 0);
+            }
+            action.setOnClickListener(view -> {
+                if (shelved) confirmDeleteShelvedWorkspace(workspace);
+                else confirmUnlockWorkspace(workspace);
+            });
+            heading.addView(action, new LinearLayout.LayoutParams(dp(38), dp(38)));
+            card.addView(heading, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
+
+            TextView titleView = new TextView(this);
+            titleView.setText(workspace.title);
+            titleView.setTextSize(16);
+            titleView.setTextColor(Color.rgb(32, 37, 46));
+            titleView.setTypeface(null, android.graphics.Typeface.BOLD);
+            titleView.setMaxLines(3);
+            card.addView(titleView, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+            TextView countView = new TextView(this);
+            countView.setText(workspace.tabs.size() + " 个子标签页");
+            countView.setTextSize(12);
+            countView.setTextColor(Color.rgb(70, 101, 176));
+            card.addView(countView, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
+
+            GridLayout.LayoutParams cardParams = new GridLayout.LayoutParams();
+            cardParams.width = cardWidth;
+            cardParams.height = dp(190);
+            cardParams.setMargins(dp(6), dp(7), dp(6), dp(7));
+            grid.addView(card, cardParams);
+        }
+        body.addView(grid);
+        return page;
+    }
+
+    private LinearLayout overviewPage(
+            String title,
+            String subtitle,
+            Runnable addAction,
+            Runnable backAction,
+            String backDescription
+    ) {
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setBackgroundColor(Color.rgb(245, 247, 251));
@@ -979,9 +1788,9 @@ public final class ReBrowserActivity extends Activity {
         header.setPadding(dp(8), dp(6), dp(8), dp(6));
         header.setBackgroundColor(Color.WHITE);
         header.setElevation(dp(4));
-        TextView back = toolbarButton("‹", "返回网页");
+        TextView back = toolbarButton("‹", backDescription);
         back.setTextSize(32);
-        back.setOnClickListener(view -> hideOverview());
+        back.setOnClickListener(view -> backAction.run());
         header.addView(back, new LinearLayout.LayoutParams(dp(48), dp(52)));
         LinearLayout labels = new LinearLayout(this);
         labels.setOrientation(LinearLayout.VERTICAL);
@@ -1000,7 +1809,11 @@ public final class ReBrowserActivity extends Activity {
         header.addView(labels, new LinearLayout.LayoutParams(0, dp(52), 1));
         TextView add = toolbarButton("＋", "新建");
         add.setTextSize(26);
-        add.setOnClickListener(view -> addAction.run());
+        if (addAction == null) {
+            add.setVisibility(View.INVISIBLE);
+        } else {
+            add.setOnClickListener(view -> addAction.run());
+        }
         header.addView(add, new LinearLayout.LayoutParams(dp(52), dp(52)));
         page.addView(header, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(64)));
@@ -1018,6 +1831,12 @@ public final class ReBrowserActivity extends Activity {
     private void hideOverview() {
         workspaceOverviewVisible = false;
         childOverviewVisible = false;
+        bookmarkOverviewVisible = false;
+        workspaceBookmarkOverviewVisible = false;
+        workspaceSelectionMode = false;
+        childSelectionMode = false;
+        selectedWorkspaceIds.clear();
+        selectedChildTabIds.clear();
         overviewContainer.animate().cancel();
         overviewContainer.setVisibility(View.GONE);
         overviewContainer.removeAllViews();
@@ -1028,14 +1847,12 @@ public final class ReBrowserActivity extends Activity {
         int visibility = visible ? View.VISIBLE : View.INVISIBLE;
         browserToolbar.setVisibility(visibility);
         webContainer.setVisibility(visibility);
-        childTabStrip.setVisibility(visibility);
         if (!visible) progressBar.setVisibility(View.GONE);
         int importance = visible
                 ? View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
                 : View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS;
         browserToolbar.setImportantForAccessibility(importance);
         webContainer.setImportantForAccessibility(importance);
-        childTabStrip.setImportantForAccessibility(importance);
     }
 
     private WebView activeWebView() {
@@ -1060,12 +1877,6 @@ public final class ReBrowserActivity extends Activity {
         if (level == ReBrowserStore.Level.PRIMARY) return "主";
         if (level == ReBrowserStore.Level.SECONDARY) return "副";
         return "临时";
-    }
-
-    private static String levelLabel(ReBrowserStore.Level level) {
-        if (level == ReBrowserStore.Level.PRIMARY) return "主标签页";
-        if (level == ReBrowserStore.Level.SECONDARY) return "副标签页";
-        return "临时标签页";
     }
 
     private FrameLayout.LayoutParams matchMatch() {
@@ -1100,7 +1911,21 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void handleSystemBack() {
-        if (workspaceOverviewVisible || childOverviewVisible) {
+        if (fullscreenContainer != null) {
+            hideFullscreenContent();
+            return;
+        }
+        if (childOverviewVisible) {
+            if (childSelectionMode) exitChildSelection();
+            else showWorkspaceOverview();
+            return;
+        }
+        if (workspaceOverviewVisible) {
+            if (workspaceSelectionMode) exitWorkspaceSelection();
+            else hideOverview();
+            return;
+        }
+        if (bookmarkOverviewVisible || workspaceBookmarkOverviewVisible) {
             hideOverview();
             return;
         }
@@ -1140,6 +1965,19 @@ public final class ReBrowserActivity extends Activity {
     }
 
     @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (root != null) root.requestApplyInsets();
+        if (fullscreenContainer != null) fullscreenContainer.requestLayout();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && fullscreenContainer != null) setFullscreenSystemUi(true);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         for (WebView webView : tabWebViews.values()) applyBrowserPreferences(webView);
@@ -1158,6 +1996,7 @@ public final class ReBrowserActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        hideFullscreenContent();
         saveCurrentTabStates();
         destroyTabWebViews();
         if (pendingFileChooser != null) pendingFileChooser.onReceiveValue(null);
@@ -1238,6 +2077,16 @@ public final class ReBrowserActivity extends Activity {
 
     private final class WorkspaceChromeClient extends WebChromeClient {
         @Override
+        public void onShowCustomView(View view, CustomViewCallback callback) {
+            showFullscreenContent(view, callback);
+        }
+
+        @Override
+        public void onHideCustomView() {
+            hideFullscreenContent();
+        }
+
+        @Override
         public void onProgressChanged(WebView view, int newProgress) {
             if (!isVisibleWebView(view)) return;
             progressBar.setProgress(newProgress);
@@ -1263,7 +2112,7 @@ public final class ReBrowserActivity extends Activity {
             if (!isUserGesture || activeWorkspace == null) return false;
             ReBrowserStore.Tab tab = store.addTab(activeWorkspace, "about:blank");
             if (tab == null) {
-                toast("每个工作区最多 50 个子 Tab");
+                toast("每个总标签页最多 50 个子标签页");
                 return false;
             }
             try {

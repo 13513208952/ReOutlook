@@ -62,11 +62,27 @@
 
         <activity
             android:name=".ReBrowserActivity"
+            android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize"
             android:exported="false"
             android:label="@string/rebrowser_name"
             android:launchMode="singleTop"
-            android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".ReBrowserLauncherActivity"
+            android:enabled="true"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:icon="@drawable/ic_rebrowser_launcher"
+            android:label="@string/rebrowser_name"
+            android:launchMode="singleTask"
+            android:noHistory="true"
+            android:taskAffinity="io.github.reoutlook.rebrowser.launcher">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
         <activity
             android:name=".MainActivity"

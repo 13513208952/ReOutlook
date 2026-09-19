@@ -3,6 +3,7 @@ package io.github.reoutlook;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.ViewGroup;
@@ -22,6 +23,10 @@ public final class ReBrowserSettingsActivity extends Activity {
     private ReBrowserPreferences preferences;
     private EditText homeUrl;
     private Spinner searchEngine;
+    private LinearLayout videoOrientationSelector;
+    private TextView videoLandscape;
+    private TextView videoAuto;
+    private TextView videoPortrait;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -51,7 +56,7 @@ public final class ReBrowserSettingsActivity extends Activity {
         content.addView(title, matchWrap());
 
         TextView scope = new TextView(this);
-        scope.setText("这些设置由同一应用内的所有 ReBrowser 工作区共享；网站登录状态仍按总标签页 Profile 隔离。");
+        scope.setText("这些设置由同一应用内的所有 ReBrowser 总标签页共享；网站登录状态仍按总标签页 Profile 隔离。");
         scope.setTextSize(13);
         scope.setTextColor(Color.rgb(93, 100, 111));
         LinearLayout.LayoutParams scopeParams = matchWrap();
@@ -88,7 +93,7 @@ public final class ReBrowserSettingsActivity extends Activity {
                 preferences::setJavascriptEnabled));
         content.addView(settingSwitch(
                 "允许第三方 Cookie",
-                "按工作区 Profile 分别保存；不会与 ReOutlook 共用",
+                "按总标签页 Profile 分别保存；不会与 ReOutlook 共用",
                 preferences.thirdPartyCookiesEnabled(),
                 preferences::setThirdPartyCookiesEnabled));
         content.addView(settingSwitch(
@@ -97,14 +102,26 @@ public final class ReBrowserSettingsActivity extends Activity {
                 preferences.desktopModeEnabled(),
                 preferences::setDesktopModeEnabled));
 
-        content.addView(sectionTitle("隐私与数据"));
-        TextView privacy = new TextView(this);
-        privacy.setText("总标签页之间隔离 Cookie、Web Storage、IndexedDB 和 Service Worker。"
-                + "关闭总标签页会安排删除整个命名 Profile。清除浏览数据和站点权限管理将在后续版本加入。");
-        privacy.setTextSize(14);
-        privacy.setTextColor(Color.rgb(62, 68, 78));
-        privacy.setLineSpacing(0, 1.15f);
-        content.addView(privacy, matchWrap());
+        content.addView(sectionTitle("总标签页生命周期"));
+        content.addView(settingSwitch(
+                "允许强行提升为主标签页",
+                "开启后，临时总标签页可跳过副级别直接提升为主；其他生命周期规则不变",
+                preferences.forcePrimaryPromotionEnabled(),
+                preferences::setForcePrimaryPromotionEnabled));
+
+        content.addView(sectionTitle("视频播放器"));
+        content.addView(settingSwitch(
+                "覆写视频播放器界面方向",
+                "关闭时根据当前全局方向状态自动选择视频方向策略",
+                preferences.videoOrientationOverrideEnabled(),
+                enabled -> {
+                    preferences.setVideoOrientationOverrideEnabled(enabled);
+                    updateVideoOrientationSelector();
+                }));
+        videoOrientationSelector = createVideoOrientationSelector();
+        content.addView(videoOrientationSelector, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(50)));
+        updateVideoOrientationSelector();
 
         Button save = new Button(this);
         save.setText("保存并返回");
@@ -137,6 +154,71 @@ public final class ReBrowserSettingsActivity extends Activity {
         label.setTextColor(Color.rgb(82, 88, 98));
         label.setPadding(0, dp(8), 0, 0);
         return label;
+    }
+
+    private LinearLayout createVideoOrientationSelector() {
+        LinearLayout selector = new LinearLayout(this);
+        selector.setOrientation(LinearLayout.HORIZONTAL);
+        selector.setGravity(Gravity.CENTER);
+        selector.setPadding(dp(3), dp(3), dp(3), dp(3));
+        selector.setBackground(roundedBackground(Color.rgb(231, 233, 239), dp(14)));
+        videoLandscape = videoOrientationChoice(
+                "横屏锁定", ReBrowserPreferences.ORIENTATION_LANDSCAPE);
+        videoAuto = videoOrientationChoice(
+                "自动旋转", ReBrowserPreferences.VIDEO_ORIENTATION_AUTO);
+        videoPortrait = videoOrientationChoice(
+                "竖屏锁定", ReBrowserPreferences.ORIENTATION_PORTRAIT);
+        selector.addView(videoLandscape);
+        selector.addView(videoAuto);
+        selector.addView(videoPortrait);
+        return selector;
+    }
+
+    private TextView videoOrientationChoice(String label, String value) {
+        TextView choice = new TextView(this);
+        choice.setText(label);
+        choice.setTextSize(14);
+        choice.setGravity(Gravity.CENTER);
+        choice.setOnClickListener(view -> {
+            preferences.setVideoOrientation(value);
+            updateVideoOrientationSelector();
+        });
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(44), 1);
+        params.setMargins(dp(2), 0, dp(2), 0);
+        choice.setLayoutParams(params);
+        return choice;
+    }
+
+    private void updateVideoOrientationSelector() {
+        if (videoOrientationSelector == null) return;
+        boolean enabled = preferences.videoOrientationOverrideEnabled();
+        String selected = preferences.videoOrientation();
+        videoOrientationSelector.setAlpha(enabled ? 1f : 0.45f);
+        styleVideoOrientationChoice(videoLandscape, enabled,
+                ReBrowserPreferences.ORIENTATION_LANDSCAPE.equals(selected));
+        styleVideoOrientationChoice(videoAuto, enabled,
+                ReBrowserPreferences.VIDEO_ORIENTATION_AUTO.equals(selected));
+        styleVideoOrientationChoice(videoPortrait, enabled,
+                ReBrowserPreferences.ORIENTATION_PORTRAIT.equals(selected));
+    }
+
+    private void styleVideoOrientationChoice(TextView choice, boolean enabled, boolean selected) {
+        if (choice == null) return;
+        choice.setEnabled(enabled);
+        choice.setTextColor(selected && enabled ? Color.WHITE : Color.rgb(55, 59, 68));
+        choice.setBackground(roundedBackground(
+                selected && enabled ? Color.rgb(91, 70, 180) : Color.TRANSPARENT,
+                dp(11)));
+        choice.setContentDescription(choice.getText()
+                + (selected ? "，已选择" : "")
+                + (enabled ? "" : "，覆写未启用"));
+    }
+
+    private GradientDrawable roundedBackground(int color, int radius) {
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(color);
+        background.setCornerRadius(radius);
+        return background;
     }
 
     private LinearLayout settingSwitch(

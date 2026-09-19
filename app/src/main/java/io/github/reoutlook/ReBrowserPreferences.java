@@ -10,6 +10,10 @@ final class ReBrowserPreferences {
     static final String SEARCH_BAIDU = "baidu";
     static final String SEARCH_DUCKDUCKGO = "duckduckgo";
     static final String SEARCH_GOOGLE = "google";
+    static final String ORIENTATION_PORTRAIT = "portrait";
+    static final String ORIENTATION_LANDSCAPE = "landscape";
+    static final String ORIENTATION_UNLOCKED = "unlocked";
+    static final String VIDEO_ORIENTATION_AUTO = "auto";
 
     private static final String PREFERENCES = "rebrowser_preferences_v1";
     private static final String HOME_URL = "home_url";
@@ -17,6 +21,10 @@ final class ReBrowserPreferences {
     private static final String JAVASCRIPT = "javascript";
     private static final String THIRD_PARTY_COOKIES = "third_party_cookies";
     private static final String DESKTOP_MODE = "desktop_mode";
+    private static final String FORCE_PRIMARY_PROMOTION = "force_primary_promotion";
+    private static final String GLOBAL_ORIENTATION = "global_orientation";
+    private static final String VIDEO_ORIENTATION_OVERRIDE = "video_orientation_override";
+    private static final String VIDEO_ORIENTATION = "video_orientation";
 
     private final SharedPreferences preferences;
 
@@ -69,6 +77,52 @@ final class ReBrowserPreferences {
 
     void setDesktopModeEnabled(boolean enabled) {
         preferences.edit().putBoolean(DESKTOP_MODE, enabled).apply();
+    }
+
+    boolean forcePrimaryPromotionEnabled() {
+        return preferences.getBoolean(FORCE_PRIMARY_PROMOTION, false);
+    }
+
+    void setForcePrimaryPromotionEnabled(boolean enabled) {
+        preferences.edit().putBoolean(FORCE_PRIMARY_PROMOTION, enabled).apply();
+    }
+
+    String globalOrientation() {
+        String value = preferences.getString(GLOBAL_ORIENTATION, ORIENTATION_PORTRAIT);
+        if (ORIENTATION_LANDSCAPE.equals(value) || ORIENTATION_UNLOCKED.equals(value)) {
+            return value;
+        }
+        return ORIENTATION_PORTRAIT;
+    }
+
+    void setGlobalOrientation(String value) {
+        if (!ORIENTATION_PORTRAIT.equals(value)
+                && !ORIENTATION_LANDSCAPE.equals(value)
+                && !ORIENTATION_UNLOCKED.equals(value)) return;
+        preferences.edit().putString(GLOBAL_ORIENTATION, value).apply();
+    }
+
+    boolean videoOrientationOverrideEnabled() {
+        return preferences.getBoolean(VIDEO_ORIENTATION_OVERRIDE, false);
+    }
+
+    void setVideoOrientationOverrideEnabled(boolean enabled) {
+        preferences.edit().putBoolean(VIDEO_ORIENTATION_OVERRIDE, enabled).apply();
+    }
+
+    String videoOrientation() {
+        String value = preferences.getString(VIDEO_ORIENTATION, ORIENTATION_LANDSCAPE);
+        if (VIDEO_ORIENTATION_AUTO.equals(value) || ORIENTATION_PORTRAIT.equals(value)) {
+            return value;
+        }
+        return ORIENTATION_LANDSCAPE;
+    }
+
+    void setVideoOrientation(String value) {
+        if (!ORIENTATION_LANDSCAPE.equals(value)
+                && !VIDEO_ORIENTATION_AUTO.equals(value)
+                && !ORIENTATION_PORTRAIT.equals(value)) return;
+        preferences.edit().putString(VIDEO_ORIENTATION, value).apply();
     }
 
     String searchUrl(String query) {

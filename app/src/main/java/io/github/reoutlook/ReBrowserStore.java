@@ -19,10 +19,12 @@ final class ReBrowserStore {
     static final String HOME_URL = "https://cn.bing.com/";
     private static final String PREFERENCES = "rebrowser_workspace_store_v1";
     private static final String WORKSPACES = "workspaces";
+    private static final String SHELVED_SECONDARIES = "shelved_secondary_workspaces";
     private static final String PENDING_PROFILE_DELETIONS = "pending_profile_deletions";
     private static final String PROFILE_PREFIX = "rebrowser_workspace_";
     private static final Pattern ID_PATTERN = Pattern.compile("[a-f0-9]{32}");
-    static final int MAX_WORKSPACES = 24;
+    static final int MAX_WORKSPACES = 64;
+    static final int MAX_PRIMARY_WORKSPACES = 5;
     private static final int MAX_TABS_PER_WORKSPACE = 50;
 
     enum Level {
@@ -38,7 +40,7 @@ final class ReBrowserStore {
 
         Tab(String id, String title, String url) {
             this.id = id;
-            this.title = cleanTitle(title, "新标签页");
+            this.title = cleanTitle(title, "新子标签页");
             this.url = safeUrl(url);
         }
     }
@@ -54,7 +56,7 @@ final class ReBrowserStore {
         Workspace(String id, String title, Level level) {
             this.id = id;
             this.profileName = PROFILE_PREFIX + id;
-            this.title = cleanTitle(title, "临时标签页");
+            this.title = cleanTitle(title, "临时总标签页");
             this.level = level;
         }
 
@@ -75,9 +77,25 @@ final class ReBrowserStore {
     }
 
     List<Workspace> loadPersistentWorkspaces() {
+        List<Workspace> result = loadWorkspaces(WORKSPACES, false, Set.of());
+        enforcePrimaryLimit(result);
+        return result;
+    }
+
+    List<Workspace> loadShelvedSecondaryWorkspaces(List<Workspace> activeWorkspaces) {
+        Set<String> activeIds = new HashSet<>();
+        for (Workspace workspace : activeWorkspaces) activeIds.add(workspace.id);
+        return loadWorkspaces(SHELVED_SECONDARIES, true, activeIds);
+    }
+
+    private List<Workspace> loadWorkspaces(
+            String key,
+            boolean secondaryOnly,
+            Set<String> excludedIds
+    ) {
         List<Workspace> result = new ArrayList<>();
-        Set<String> workspaceIds = new HashSet<>();
-        String serialized = preferences.getString(WORKSPACES, "[]");
+        Set<String> workspaceIds = new HashSet<>(excludedIds);
+        String serialized = preferences.getString(key, "[]");
         try {
             JSONArray values = new JSONArray(serialized);
             for (int index = 0; index < values.length() && result.size() < MAX_WORKSPACES; index++) {
@@ -91,7 +109,7 @@ final class ReBrowserStore {
                 } catch (IllegalArgumentException ignored) {
                     continue;
                 }
-                if (level == Level.TEMPORARY) continue;
+                if (level == Level.TEMPORARY || secondaryOnly && level != Level.SECONDARY) continue;
                 Workspace workspace = new Workspace(id, value.optString("title"), level);
                 JSONArray tabs = value.optJSONArray("tabs");
                 Set<String> tabIds = new HashSet<>();
@@ -115,12 +133,11 @@ final class ReBrowserStore {
         } catch (Exception ignored) {
             // Corrupt metadata is discarded; named Profile data is not touched automatically.
         }
-        normalizePrimary(result);
         return result;
     }
 
     Workspace createTemporaryWorkspace() {
-        Workspace workspace = new Workspace(newId(), "临时标签页", Level.TEMPORARY);
+        Workspace workspace = new Workspace(newId(), "临时总标签页", Level.TEMPORARY);
         Tab tab = newTab();
         workspace.tabs.add(tab);
         workspace.activeTabId = tab.id;
@@ -130,7 +147,7 @@ final class ReBrowserStore {
 
     Tab addTab(Workspace workspace, String url) {
         if (workspace.tabs.size() >= MAX_TABS_PER_WORKSPACE) return null;
-        Tab tab = new Tab(newId(), "新标签页", url);
+        Tab tab = new Tab(newId(), "新子标签页", url);
         workspace.tabs.add(tab);
         workspace.activeTabId = tab.id;
         return tab;
@@ -144,38 +161,101 @@ final class ReBrowserStore {
         }
         if (persistentCount >= MAX_WORKSPACES) return false;
         workspace.level = Level.SECONDARY;
-        workspace.title = cleanTitle(workspace.title, "副标签页");
+        workspace.title = cleanTitle(workspace.title, "副总标签页");
         unmarkProfileForDeletion(workspace.profileName);
         save(allWorkspaces);
         return true;
     }
 
-    void promoteToPrimary(Workspace workspace, List<Workspace> allWorkspaces) {
-        if (workspace.level != Level.SECONDARY) return;
-        for (Workspace candidate : allWorkspaces) {
-            if (candidate.level == Level.PRIMARY) candidate.level = Level.SECONDARY;
-        }
-        workspace.level = Level.PRIMARY;
+    boolean unlockToTemporary(Workspace workspace, List<Workspace> allWorkspaces) {
+        if (workspace.level != Level.SECONDARY) return false;
+        workspace.level = Level.TEMPORARY;
+        markProfileForDeletion(workspace.profileName);
         save(allWorkspaces);
+        return true;
+    }
+
+    boolean promoteToPrimary(
+            Workspace workspace,
+            List<Workspace> allWorkspaces,
+            boolean allowTemporary
+    ) {
+        if (workspace.level != Level.SECONDARY
+                && !(allowTemporary && workspace.level == Level.TEMPORARY)) return false;
+        if (!canPromoteToPrimary(allWorkspaces)) return false;
+        workspace.level = Level.PRIMARY;
+        unmarkProfileForDeletion(workspace.profileName);
+        save(allWorkspaces);
+        return true;
+    }
+
+    boolean demotePrimaryToSecondary(Workspace workspace, List<Workspace> allWorkspaces) {
+        if (workspace.level != Level.PRIMARY) return false;
+        workspace.level = Level.SECONDARY;
+        unmarkProfileForDeletion(workspace.profileName);
+        save(allWorkspaces);
+        return true;
     }
 
     void removeWorkspace(Workspace workspace, List<Workspace> allWorkspaces) {
+        if (workspace.level == Level.PRIMARY) return;
         allWorkspaces.remove(workspace);
         markProfileForDeletion(workspace.profileName);
-        normalizePrimary(allWorkspaces);
         save(allWorkspaces);
     }
 
     void save(List<Workspace> workspaces) {
+        saveWorkspaces(WORKSPACES, workspaces, false);
+    }
+
+    void saveShelvedSecondaryWorkspaces(List<Workspace> workspaces) {
+        saveWorkspaces(SHELVED_SECONDARIES, workspaces, true);
+    }
+
+    void shelfSecondary(
+            Workspace workspace,
+            List<Workspace> activeWorkspaces,
+            List<Workspace> shelvedWorkspaces
+    ) {
+        if (workspace.level != Level.SECONDARY || !activeWorkspaces.remove(workspace)) return;
+        if (!shelvedWorkspaces.contains(workspace)) shelvedWorkspaces.add(workspace);
+        unmarkProfileForDeletion(workspace.profileName);
+        save(activeWorkspaces);
+        saveShelvedSecondaryWorkspaces(shelvedWorkspaces);
+    }
+
+    boolean restoreSecondary(
+            Workspace workspace,
+            List<Workspace> activeWorkspaces,
+            List<Workspace> shelvedWorkspaces
+    ) {
+        if (workspace.level != Level.SECONDARY || activeWorkspaces.size() >= MAX_WORKSPACES
+                || !shelvedWorkspaces.remove(workspace)) return false;
+        activeWorkspaces.add(workspace);
+        unmarkProfileForDeletion(workspace.profileName);
+        save(activeWorkspaces);
+        saveShelvedSecondaryWorkspaces(shelvedWorkspaces);
+        return true;
+    }
+
+    void deleteShelvedSecondary(Workspace workspace, List<Workspace> shelvedWorkspaces) {
+        if (!shelvedWorkspaces.remove(workspace)) return;
+        markProfileForDeletion(workspace.profileName);
+        saveShelvedSecondaryWorkspaces(shelvedWorkspaces);
+    }
+
+    private void saveWorkspaces(String key, List<Workspace> workspaces, boolean secondaryOnly) {
         JSONArray values = new JSONArray();
         int saved = 0;
         for (Workspace workspace : workspaces) {
-            if (workspace.level == Level.TEMPORARY || saved >= MAX_WORKSPACES) continue;
+            if (workspace.level == Level.TEMPORARY
+                    || secondaryOnly && workspace.level != Level.SECONDARY
+                    || saved >= MAX_WORKSPACES) continue;
             JSONObject value = new JSONObject();
             JSONArray tabs = new JSONArray();
             try {
                 value.put("id", workspace.id);
-                value.put("title", cleanTitle(workspace.title, "常用标签页"));
+                value.put("title", cleanTitle(workspace.title, "常用总标签页"));
                 value.put("level", workspace.level.name());
                 value.put("activeTabId", workspace.activeTabId);
                 for (int index = 0;
@@ -184,7 +264,7 @@ final class ReBrowserStore {
                     Tab tab = workspace.tabs.get(index);
                     JSONObject serializedTab = new JSONObject();
                     serializedTab.put("id", tab.id);
-                    serializedTab.put("title", cleanTitle(tab.title, "新标签页"));
+                    serializedTab.put("title", cleanTitle(tab.title, "新子标签页"));
                     serializedTab.put("url", safeUrl(tab.url));
                     tabs.put(serializedTab);
                 }
@@ -195,7 +275,7 @@ final class ReBrowserStore {
                 // org.json only rejects unsupported values; every value here is a bounded string.
             }
         }
-        preferences.edit().putString(WORKSPACES, values.toString()).apply();
+        preferences.edit().putString(key, values.toString()).apply();
     }
 
     Set<String> pendingProfileDeletions() {
@@ -224,19 +304,27 @@ final class ReBrowserStore {
     }
 
     private static Tab newTab() {
-        return new Tab(newId(), "新标签页", HOME_URL);
+        return new Tab(newId(), "新子标签页", HOME_URL);
     }
 
     private static String newId() {
         return UUID.randomUUID().toString().replace("-", "");
     }
 
-    private static void normalizePrimary(List<Workspace> workspaces) {
-        boolean foundPrimary = false;
+    boolean canPromoteToPrimary(List<Workspace> workspaces) {
+        int primaryCount = 0;
+        for (Workspace workspace : workspaces) {
+            if (workspace.level == Level.PRIMARY) primaryCount++;
+        }
+        return primaryCount < MAX_PRIMARY_WORKSPACES;
+    }
+
+    private static void enforcePrimaryLimit(List<Workspace> workspaces) {
+        int primaryCount = 0;
         for (Workspace workspace : workspaces) {
             if (workspace.level != Level.PRIMARY) continue;
-            if (foundPrimary) workspace.level = Level.SECONDARY;
-            foundPrimary = true;
+            primaryCount++;
+            if (primaryCount > MAX_PRIMARY_WORKSPACES) workspace.level = Level.SECONDARY;
         }
     }
 

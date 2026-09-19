@@ -40,7 +40,7 @@ non-secret key metadata while the RSA private key remains the actual proof of au
 - `workspaces` / `tabs`: open the corresponding overview;
 - `settings`: open browser-global settings;
 - `set-home URL`: update the browser-global homepage;
-- `state`: return bounded workspace/Tab metadata;
+- `state`: return bounded open and shelved 总标签页/子标签页 metadata;
 - `outlook`: switch back to the ReOutlook mode;
 - `clear` and `result`: clear a challenge or inspect the last control result.
 
@@ -53,7 +53,7 @@ python3 tools/admin/rebrowser_admin.py open https://example.com/ --auth key
 python3 tools/admin/rebrowser_admin.py new-tab --auth device
 ```
 
-The state command exposes only workspace IDs, controlled Profile names, titles, and page origins.
+The state command exposes only open/shelved 总标签页 IDs, controlled Profile names, titles, and page origins.
 It strips URL paths, queries, and fragments and never reads Cookie, passwords, tokens, Web Storage,
 IndexedDB, or Service Worker data. The bridge intentionally does not provide arbitrary JavaScript
 execution or authentication-data extraction.

@@ -1,55 +1,59 @@
-# ReOutlook
+# ReOutlook / ReBrowser
 
-一个用于验证以下思路的 Android 原型：
+一个 Android 应用，两种互相隔离但可随时切换的使用形态：
 
-- 在线时在 WebView 中使用 Outlook 官方网页及学校自己的认证流程；
-- 保留 WebView Cookie、DOM Storage 和站点数据，尽量延续登录会话；
-- 仅在 Outlook 页面上尝试识别已经打开的邮件并保存到本地；
-- 网络或登录不可用时，通过独立的本地界面阅读缓存邮件。
+- **ReOutlook**：在线使用完整 Outlook Web，并将已同步邮件保存到本地供离线阅读。
+- **ReBrowser**：基于系统 WebView Multi-Profile 的轻量浏览器；以“总标签页”管理独立网站环境，以“子标签页”管理环境内页面。
 
-## 当前阶段
+安装同一个 `io.github.reoutlook` APK 后，桌面会出现 **ReOutlook** 和 **ReBrowser** 两个入口。它们不是两个 APK；ReOutlook 独占 WebView Default Profile，ReBrowser 只使用隔离的命名 Profile。
 
-这是 **0.1 验证原型**，不是可发布的邮件客户端。目前能够：
+> **项目状态：实验性原型。** 当前代码已经在真实设备上完成核心流程验证，但尚未接受独立安全审计，也不是成熟的生产邮件或浏览器产品。
 
-1. 打开 `https://outlook.office.com/mail/`；
-2. 支持网页后退、刷新、文件选择和学校登录跳转；应用控制收纳在悬浮球抽屉中；
-3. 在页面启动前安装受域名限制的响应观察器，自动缓存 Outlook 已加载的结构化完整邮件；
-4. 根据 `FindConversation` 结果限速调用 `GetConversationItems`，从新到旧主动回填；
-5. 使用带远端修订标识的本地会话检查点：未变化会话跳过，新回复或 ChangeKey 变化后重新同步；每次启动最多新增回填 50 个会话；
-6. 手动运行实验性 DOM 适配器，作为当前阅读邮件的回退采集方式；
-7. 在“本地邮件”中离线显示已缓存正文，列表按收件时间排序并按需读取正文；
-8. WebView 全屏显示，本地邮件采用紧凑标题栏、彩色头像和分层排版；
-9. 使用可拖拽、半透明、记忆高度并自动吸附左右边缘的悬浮球打开抽屉；
-10. 返回键优先返回邮件详情或外部网页的上级页面，仅在邮箱列表顶层采用两次返回退出；
-11. 适配状态栏、挖孔/刘海、底部手势安全区，并为贴边悬浮球设置局部手势排除区；
-12. 可持久化开启 WebView 邮件列表自动滚动，抽屉打开、邮件详情页或用户触摸页面时自动暂停；
-13. 根据 Outlook anchor mailbox 建立账号指纹，邮件、去重索引和同步检查点全部按账号隔离；
-14. 内置无普通界面入口、仅持 Android shell 权限可调用的管理员维护通道，必须同时通过离线管理员签名与机主系统锁屏验证，才能生成管理员公钥加密的账号导出；
-15. debug APK 内提供独立的 ReBrowser Multi-Profile 探针，用于验证“一个总标签页对应一个命名 Profile、多个子 Tab 共用该 Profile”的隔离模型；release APK 不包含此探针；
-16. 正式加入 ReBrowser 早期工作区界面：它是同一个 APK、同一个应用入口中的第二种形态；Chrome 风格总标签页总览中的每张卡片代表一个完整工作区，工作区内部另有独立的子 Tab 条和子 Tab 卡片总览；
-17. ReBrowser 已建立浏览器全局设置页，可配置主页、搜索引擎、JavaScript、第三方 Cookie 和桌面模式；系统返回按钮与边缘手势统一遵循“网页历史→主页→两次返回退出”；
-18. ReBrowser 提供仅限 ADB shell 的一次性管理员控制通道，可选择管理员密钥签名或机主系统锁屏确认二者之一，且不降低 ReOutlook 邮件导出的双重授权要求。
+## ReOutlook
 
-学校登录、Duo、移动版 Outlook、自动分页、结构化正文采集和离线正文均已在真实设备上验证。v2 → v4 账号隔离迁移已在保留 612 封邮件的真实数据库上通过，PUID/SMTP 同账号别名已合并；会话修订变化后会重新同步；ADB 管理员签名、机主锁屏确认、加密导出和离线解密也已在主力机完成端到端验证。
+ReOutlook 保留 Outlook 官方网页、学校登录和 MFA 流程，同时提供本地离线邮件档案：
 
-回填请求只在 Outlook 页面中复用其临时请求上下文；认证信息不会通过原生桥传递，也不会写入应用数据库。
+- 在受限制的 Outlook 来源内观察结构化邮件响应；
+- 主动、限速地回填历史会话和完整正文；
+- 使用远端修订标识和保守检查点避免错误完成同步；
+- 按账号隔离邮件、去重索引和同步状态；
+- 在禁用脚本、网络和文件访问的原生离线界面中阅读正文；
+- 使用全屏网页和可拖拽、自动吸附的悬浮球抽屉；
+- 提供必须由管理员签名及机主锁屏共同授权的加密应急导出。
 
-目前尚未实现附件及远程图片缓存、多账号界面、后台同步和离线操作回放。数据库位于 Android 凭据加密的应用私有目录，但没有额外采用 SQLCipher 整库加密；这是当前选定的“普通官方客户端式”安全模型。
+认证请求只在 Outlook 页面内存中复用。原生消息桥和邮件数据库不读取或持久化密码、Cookie、访问令牌、刷新令牌或 Web Storage。
 
-ReBrowser 已进入不影响 ReOutlook 的早期 MVP 阶段。它不是第二个软件：release 仅保留一个桌面启动入口，并在应用内部从 ReOutlook 切换。它只使用命名 Profile，绝不回退到 ReOutlook 使用的 Default Profile；总标签页、子 Tab、生命周期、探针范围和真机结果见 [docs/REBROWSER_EXPLORATION.md](docs/REBROWSER_EXPLORATION.md)。
+详细设计见 [ReOutlook 架构与同步](docs/REOUTLOOK_ARCHITECTURE.md)。
 
-## 安全边界
+## ReBrowser
 
-- 原型不会读取或保存 Cookie、访问令牌、密码及 Web Storage 内容；
-- DOM 和结构化响应采集仅在 Outlook 官方邮件域名上执行；
-- 本地正文 WebView 禁用 JavaScript、网络请求、文件访问和页面跳转；
-- SQLite 文件依赖 Android 文件级加密（FBE）和应用沙箱保护，数据库被解锁并单独提取后的内容没有 SQLCipher 二次保护；
-- 系统自动备份保持关闭，后续备份只通过带账号验证或机主授权的应用内显式流程执行；
-- 管理员私钥不进入 APK 或项目仓库，维护组件常驻注册但仅限 Android shell 调用，且没有正常界面入口。
+ReBrowser 的核心原则是 **Persist by intent, not by visitation（由意图决定持久化，而不是由访问决定）**：
 
-## 构建
+- 每个总标签页拥有独立命名 Profile，并可包含多个共享该 Profile 的子标签页；
+- 新总标签页默认是关闭即清理的临时环境；
+- 用户主动上锁后成为副总标签页，完整环境进入书签栏并可收起、恢复；
+- 再次明确提升后成为不可关闭、启动时恢复的主总标签页；
+- 收藏夹保存标题和网址，书签栏保存完整副总标签页环境；
+- 最多同时存在 5 个主总标签页、64 个总标签页，每个总标签页最多 50 个子标签页；
+- 支持网页新窗口转为当前环境内的子标签页、原生全屏视频、持久化全局方向及独立的视频方向策略；
+- 不支持 WebView `MULTI_PROFILE` 时完全禁用，不回退到 ReOutlook 的 Default Profile。
 
-要求 JDK 17 和 Android SDK 36：
+当前版本不会把自身注册为系统默认浏览器候选。完整模型和交互说明见 [ReBrowser 设计](docs/REBROWSER_EXPLORATION.md)。独立的 [ReBrowser 仓库](https://github.com/13513208952/ReBrowser) 仅作为项目入口，代码统一维护在本仓库。
+
+## 管理员控制
+
+项目保留两种不出现在普通界面中的 ADB 管理能力：
+
+- **ReOutlook 维护**：邮件导出必须同时通过离线管理员签名和机主系统锁屏确认，导出文件使用 AES-256-GCM 与 RSA-OAEP 加密。
+- **ReBrowser 控制**：在 ADB shell 边界内，经管理员签名或机主锁屏二者之一授权后，可执行有限的导航、标签页、设置、状态和模式切换命令。
+
+两种接口都不提供任意 JavaScript、Cookie、Token、Web Storage 或密码提取能力。参见 [管理员工具](tools/admin/README.md) 和 [ReBrowser 管理协议](docs/REBROWSER_ADMIN_CONTROL.md)。管理员私钥不包含在 APK 或公开仓库中。
+
+## 下载与安装
+
+开发者预览 APK 发布在 [GitHub Releases](https://github.com/13513208952/ReOutlook/releases)。当前公开包使用 Android Debug 证书签署，以便测试设备连续升级，但 Release 构建本身不含 `DEBUGGABLE` 标志。不要把该签名视为正式生产签名。
+
+也可以从源码构建。要求 JDK 17 和 Android SDK 36：
 
 ```bash
 export JAVA_HOME=/path/to/jdk-17
@@ -57,20 +61,30 @@ export ANDROID_HOME=$HOME/Android/Sdk
 ./gradlew assembleDebug
 ```
 
-安装包将生成在 `app/build/outputs/apk/debug/app-debug.apk`。
+调试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
 
-## 下一步验证
+## 文档
 
-1. 验证真实超过 20 封邮件的长会话，以及新增回复、移动和删除语义；
-2. 在第二个真实 Outlook 账号上验证账号切换与分区隔离；
-3. 将数据访问层迁移到 Room，并建立 v4 数据库的无损迁移测试；
-4. 实现普通用户显式备份、同账号验证和导入回滚；
-5. 继续完善 ReBrowser：网页缩略图、站点信息、书签、下载、分享、深色模式、完整新标签页和受限大小的历史状态恢复。
+| 文档 | 内容 |
+| --- | --- |
+| [ReOutlook 架构与同步](docs/REOUTLOOK_ARCHITECTURE.md) | 邮件采集、回填、检查点、账号隔离和离线界面 |
+| [ReBrowser 设计](docs/REBROWSER_EXPLORATION.md) | 双层标签、Profile、生命周期、方向和返回策略 |
+| [ReBrowser 管理协议](docs/REBROWSER_ADMIN_CONTROL.md) | ADB 挑战授权、命令范围和数据边界 |
+| [项目状态](docs/PROJECT_STATUS.md) | 已验证能力、当前限制和后续工作 |
+| [隐私说明](PRIVACY.md) | 本地数据、网络通信、备份和删除 |
+| [安全策略](SECURITY.md) | 安全边界、管理员接口和漏洞报告 |
+| [管理员工具](tools/admin/README.md) | 命令行使用和加密导出解密 |
 
-## 隐私与安全
+## 数据与安全边界
 
-参见 [PRIVACY.md](PRIVACY.md)、[SECURITY.md](SECURITY.md) 和管理员工具说明 [tools/admin/README.md](tools/admin/README.md)。管理员私钥不包含在公开仓库中。
+- 数据库使用应用私有 SQLite、Android 文件级加密（FBE）和应用沙箱，不额外使用 SQLCipher；
+- Android 自动备份保持关闭，备份和导出必须经过显式授权；
+- ReBrowser 网站状态由系统 WebView 存放在各命名 Profile 中；
+- 应用没有开发者服务器、广告、遥测或分析服务；
+- 普通界面允许截图，涉及管理员授权和导出的维护界面使用 `FLAG_SECURE`。
+
+更完整的边界以 [PRIVACY.md](PRIVACY.md) 和 [SECURITY.md](SECURITY.md) 为准。
 
 ## 许可证与声明
 
-本项目采用 [GNU General Public License v3.0](LICENSE) 发布，与 Microsoft、Outlook 或任何学校没有隶属或官方合作关系。Outlook 及相关名称属于其各自权利人。
+本项目采用 [GNU General Public License v3.0](LICENSE) 发布，与 Microsoft、Outlook、Google Chrome 或任何学校没有隶属或官方合作关系。Outlook、Chrome 及相关名称和商标属于其各自权利人。
