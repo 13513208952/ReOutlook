@@ -18,7 +18,7 @@ Outlook 登录 Cookie、Web Storage 和登录会话由 Android WebView 按网页
 
 ## 显式备份与管理员维护
 
-Android 自动备份保持关闭。管理员维护接口没有普通应用内入口，只允许 Android shell 调用。ReOutlook 邮件导出必须同时具备有效的一次性管理员签名和机主在前台完成的 Android 系统锁屏凭据确认。ReBrowser 的受限开发控制命令可以由管理员密钥或系统锁屏确认二者之一授权，但不会提供 Cookie、令牌、Web Storage、任意 JavaScript 或邮件数据读取能力。
+Android 自动备份保持关闭。管理员维护接口没有普通应用内入口，只允许 Android shell 调用。ReOutlook 邮件导出必须同时具备有效的一次性管理员签名和机主在前台完成的 Android 系统锁屏凭据确认。ReBrowser 的三级受限开发协议允许永久管理员根独立授权全部级别，机主锁屏单独授权只允许一、二级；状态及审计仅保存网页 origin，不提供 Cookie、令牌、Web Storage、任意 JavaScript 或邮件数据读取能力。
 
 管理员导出文件采用 AES-256-GCM 加密，内容密钥由独立的管理员 RSA-3072 导出公钥包装。持有对应导出私钥的人可以解密已获机主授权的导出文件。导出中不包含密码、Cookie、访问令牌、刷新令牌或 Web Storage。
 

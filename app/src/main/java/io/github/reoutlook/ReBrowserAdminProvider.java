@@ -7,6 +7,8 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 
+import org.json.JSONObject;
+
 /** ADB-shell-only endpoint for issuing one-use ReBrowser control challenges. */
 public final class ReBrowserAdminProvider extends ContentProvider {
     @Override
@@ -21,9 +23,12 @@ public final class ReBrowserAdminProvider extends ContentProvider {
             ReBrowserAdminAuthorizer.clearPendingChallenge(context);
             return Bundle.EMPTY;
         }
-        if ("getLastResult".equals(method)) {
+        if ("getLastResult".equals(method) || "getResult".equals(method)) {
+            String value = "getResult".equals(method)
+                    ? ReBrowserAdminProtocol.result(context, argument)
+                    : ReBrowserAdminProtocol.lastResult(context);
             Bundle result = new Bundle();
-            result.putString("result", ReBrowserAdminAuthorizer.lastResult(context));
+            result.putString("payload", ReBrowserAdminProtocol.encode(value));
             return result;
         }
         if (!"createChallenge".equals(method)) {
@@ -31,20 +36,21 @@ public final class ReBrowserAdminProvider extends ContentProvider {
         }
         try {
             String challenge = ReBrowserAdminAuthorizer.createChallenge(context, argument);
-            ReBrowserAdminAuthorizer.recordResult(context, "challenge-created");
+            JSONObject last = new JSONObject(ReBrowserAdminProtocol.lastResult(context));
             Bundle result = new Bundle();
             result.putString("challenge", challenge);
-            result.putString("administratorKey", "rsa3072:0c045556f779ddc4");
-            result.putString("authentication", "administrator-key OR device-credential");
+            result.putString("requestId", last.optString("requestId"));
+            result.putInt("authorizationLevel", last.optInt("authorizationLevel", 1));
+            result.putString("administratorKeys",
+                    "reoutlook-root-v1,rebrowser-root-v1");
+            result.putString("authentication", last.optInt("authorizationLevel", 1) >= 3
+                    ? "administrator-root-key"
+                    : "administrator-root-key OR device-credential");
             result.putLong("expiresInSeconds", 180);
             return result;
         } catch (Exception error) {
             throw new SecurityException("Unable to create ReBrowser administrator challenge", error);
         }
-    }
-
-    static void recordResult(Context context, String result) {
-        ReBrowserAdminAuthorizer.recordResult(context, result);
     }
 
     private Context attachedContext() {

@@ -1,63 +1,88 @@
 # ReBrowser ADB administrator control
 
-ReBrowser is a mode inside the same `io.github.reoutlook` application, not a second application.
-Its administrator bridge exists for development, recovery, and controlled automation. It does not
-weaken the stricter ReOutlook mail-export protocol.
+ReBrowser is a mode inside the same `io.github.reoutlook` application, not a second APK. Its administrator bridge exists for development, recovery, and controlled automation. It does not weaken the stricter ReOutlook mail-export protocol.
 
-## Boundary
+## Platform and authorization boundary
 
-Both exported ReBrowser administrator components require `android.permission.DUMP`, so only ADB
-shell/system callers can reach them. Every command additionally requires **one** of:
+Both exported ReBrowser administrator components require `android.permission.DUMP`, so only ADB shell/system callers can reach them. Every command then uses a three-minute, single-use challenge bound to the exact request, installation ID, request ID, random nonce, issue time, and expiry.
 
-1. a valid RSA-3072/SHA-256 signature from the currently authorized development administrator key; or
-2. a successful foreground Android system-lock credential confirmation by the device owner.
+Two immutable public roots are compiled into the application:
 
-These alternatives apply only to ReBrowser control. ReOutlook administrator mail export continues
-to require both an administrator signature and owner confirmation.
+- `reoutlook-root-v1`: RSA-3072/SHA-256, fingerprint `0c045556f779ddc469cdf64c14b33f27904bf75fd48956111860a9f081be99fd`;
+- `rebrowser-root-v1`: ECDSA P-256/SHA-256, fingerprint `38d674fb6eb66ed4efaf2360def9c023c81b18a594b3fcea127bc87338a0ef01`.
 
-Challenges bind the exact command and arguments, installation ID, random nonce, issue time, and
-three-minute expiry. A challenge is single-use. A normal application launch clears an interrupted
-challenge.
+Both roots can independently authorize all three ReBrowser control levels and cannot be disabled by an application setting or administrator command. The ReBrowser root does **not** authorize ReOutlook mail export. ReOutlook export continues to require its RSA administrator signature and a separate foreground owner-credential confirmation.
 
-## Development key decision
+The device owner may approve level-one and level-two ReBrowser operations using the Android system lock credential instead of a root signature. Level-three operations always require at least one administrator root signature and cannot be approved by the owner credential alone.
 
-The development bridge temporarily trusts the existing ReOutlook administrator signing public key.
-Its private key remains outside the APK and public repository.
+Other trusted keys, if introduced, must be added with explicit scopes in source code and a new APK. There is no command for enrolling a key. Non-root keys may be marked unavailable by a later build; the two development roots have no runtime revocation state.
 
-A hardware/network MAC address is deliberately not used as a secret key: MAC addresses are
-identifiers, may be observable, can be spoofed, and are often unavailable or randomized on modern
-Android. No raw workstation or device MAC is embedded in the APK or committed to the repository.
-If workstation binding is needed later, a hash of a local machine identifier can be recorded as
-non-secret key metadata while the RSA private key remains the actual proof of authorization.
+## Authorization levels
 
-## Supported commands
+- **Level 1:** bounded state, diagnostics, navigation, UI routing, and browser settings.
+- **Level 2:** lifecycle and destructive object operations such as locking, shelving, closing, or deleting a specific workspace/tab. Delete commands bind an exact object ID and require `confirmDelete=true`.
+- **Level 3:** invariant repair. The current `REPAIR_STATE` command only cancels deletion markers that conflict with still-persistent workspaces and repairs bounded active-tab metadata.
 
-`tools/admin/rebrowser_admin.py` supports:
+The owner-confirmation screen displays the operation, level, target IDs, and a destructive-operation warning. It does not offer an owner-only approval button for level three.
 
-- `open URL`: navigate the current child Tab;
-- `new-workspace`: create and activate a temporary outer workspace/Profile;
-- `new-tab`: create a child Tab in the current workspace/Profile;
-- `workspaces` / `tabs`: open the corresponding overview;
-- `settings`: open browser-global settings;
-- `set-home URL`: update the browser-global homepage;
-- `state`: return bounded open and shelved 总标签页/子标签页 metadata;
-- `outlook`: switch back to the ReOutlook mode;
-- `clear` and `result`: clear a challenge or inspect the last control result.
+## Protocol v2
+
+Every request contains a protocol version, unique request ID, operation, optional target IDs, and bounded arguments. Results are stored independently by request ID and move through structured states:
+
+- `challenge-created`
+- `authorized`
+- `queued`
+- `running`
+- `completed`
+- `failed`
+- `cancelled`
+
+Terminal results contain structured details or a bounded error string. The CLI polls `getResult` by request ID instead of guessing from the foreground UI. Navigation commands can use `--wait`; completion is then reported only after the targeted main frame finishes, fails, or reaches the bounded timeout.
+
+A bounded audit ring records the request ID, operation, level, authorization method, key ID, target IDs, status, and time. It does not record complete URLs or page content.
+
+## Supported command groups
+
+`tools/admin/rebrowser_admin.py` currently supports:
+
+- capability and state: `capabilities`, `state`, `diagnostics`, `audit`, `validate`;
+- navigation: `open`, `reload`, `stop`, `back`, `forward`, `home`, and non-disclosing `assert-location`;
+- object selection: `activate-workspace`, `activate-tab`;
+- creation and UI: `new-workspace`, `new-tab`, `workspaces`, `tabs`, `settings`, `outlook`;
+- lifecycle: `lock`, `unlock`, `promote`, `demote`, `shelve`, `restore`;
+- destructive operations: `close-workspace`, `close-tab`, `delete-shelved` with `--confirm-delete`;
+- settings: `set-home` and whitelisted `set-pref` values;
+- level-three bounded repair: `repair`.
 
 Examples:
 
 ```bash
-export REOUTLOOK_MAINTENANCE_PRIVATE_KEY=/secure/path/reoutlook-maintenance-rsa-private.pem
-python3 tools/admin/rebrowser_admin.py state --auth key
-python3 tools/admin/rebrowser_admin.py open https://example.com/ --auth key
-python3 tools/admin/rebrowser_admin.py new-tab --auth device
+export REBROWSER_ROOT_PRIVATE_KEY=/secure/path/rebrowser-root-v1-private.pem
+
+python3 tools/admin/rebrowser_admin.py capabilities --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py state --key-id rebrowser-root-v1 --compact
+python3 tools/admin/rebrowser_admin.py new-workspace --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py open https://www.baidu.com/ \
+  --workspace WORKSPACE_ID --tab TAB_ID --wait --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py lock WORKSPACE_ID --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py close-workspace WORKSPACE_ID \
+  --confirm-delete --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py repair --key-id rebrowser-root-v1
 ```
 
-The state command exposes only open/shelved 总标签页 IDs, controlled Profile names, titles, and page origins.
-It strips URL paths, queries, and fragments and never reads Cookie, passwords, tokens, Web Storage,
-IndexedDB, or Service Worker data. The bridge intentionally does not provide arbitrary JavaScript
-execution or authentication-data extraction.
+The existing ReOutlook RSA root remains accepted:
 
-Ordinary third-party apps cannot call this ADB-only bridge. A future plugin/automation API should
-use a separate signature permission and explicit capability grants rather than opening this
-administrator surface to all installed apps.
+```bash
+export REOUTLOOK_MAINTENANCE_PRIVATE_KEY=/secure/path/reoutlook-maintenance-rsa-private.pem
+python3 tools/admin/rebrowser_admin.py diagnostics --key-id reoutlook-root-v1
+```
+
+Use `--auth device` for an owner-approved level-one or level-two command. Run `--help` for target and wait options.
+
+## Data boundary
+
+State and diagnostics expose bounded workspace/tab IDs, controlled Profile names, titles, page origins, load progress, main-frame errors, lifecycle levels, feature support, and non-secret settings. URL paths, queries, and fragments are stripped.
+
+The bridge never reads or returns passwords, Cookie, tokens, Web Storage, IndexedDB, Service Worker data, or ReOutlook mail. It does not provide arbitrary JavaScript execution, arbitrary database access, arbitrary private-file access, or arbitrary Intent execution.
+
+Ordinary third-party applications cannot call this ADB-only bridge. A future plugin API must use a separate signature permission and explicit capability grants rather than exposing this administrator surface.

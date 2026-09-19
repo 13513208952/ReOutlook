@@ -25,7 +25,7 @@ final class ReBrowserStore {
     private static final Pattern ID_PATTERN = Pattern.compile("[a-f0-9]{32}");
     static final int MAX_WORKSPACES = 64;
     static final int MAX_PRIMARY_WORKSPACES = 5;
-    private static final int MAX_TABS_PER_WORKSPACE = 50;
+    static final int MAX_TABS_PER_WORKSPACE = 50;
 
     enum Level {
         TEMPORARY,

@@ -45,7 +45,7 @@ ReBrowser 的核心原则是 **Persist by intent, not by visitation（由意图�
 项目保留两种不出现在普通界面中的 ADB 管理能力：
 
 - **ReOutlook 维护**：邮件导出必须同时通过离线管理员签名和机主系统锁屏确认，导出文件使用 AES-256-GCM 与 RSA-OAEP 加密。
-- **ReBrowser 控制**：在 ADB shell 边界内，经管理员签名或机主锁屏二者之一授权后，可执行有限的导航、标签页、设置、状态和模式切换命令。
+- **ReBrowser 控制**：版本化协议支持按总标签页／子标签页 ID 执行导航、生命周期、设置、诊断、审计和有界修复；永久管理员根可独立授权全部三级操作，机主锁屏单独授权仅限一、二级。
 
 两种接口都不提供任意 JavaScript、Cookie、Token、Web Storage 或密码提取能力。参见 [管理员工具](tools/admin/README.md) 和 [ReBrowser 管理协议](docs/REBROWSER_ADMIN_CONTROL.md)。管理员私钥不包含在 APK 或公开仓库中。
 

@@ -16,9 +16,9 @@ Do not treat it as a hardened enterprise mail product.
 
 Administrator components have no launcher or normal in-app entry point and require the platform `android.permission.DUMP` permission used by Android shell. A ReOutlook data export additionally requires a short-lived, single-use administrator signature bound to the installation, active account, operation, nonce, and expiry. The device owner must then approve the export through Android's system lock credential UI.
 
-The bounded ReBrowser development-control bridge uses a separate one-use challenge and accepts either the authorized administrator signature or foreground device-credential confirmation. It can navigate and manage browser UI/state, but does not expose arbitrary JavaScript execution, Cookie, tokens, Web Storage, or ReOutlook mail data. Details are in [docs/REBROWSER_ADMIN_CONTROL.md](docs/REBROWSER_ADMIN_CONTROL.md).
+The bounded ReBrowser protocol-v2 bridge uses a separate one-use challenge and three authorization levels. Either immutable administrator root may independently authorize every ReBrowser level; foreground device credential alone is limited to levels one and two. Requests and results carry unique IDs, destructive commands bind exact object IDs, and level-three repair requires a root signature. The bridge does not expose arbitrary JavaScript execution, Cookie, tokens, Web Storage, or ReOutlook mail data. Details are in [docs/REBROWSER_ADMIN_CONTROL.md](docs/REBROWSER_ADMIN_CONTROL.md).
 
-The APK contains only administrator public keys. Private keys and raw device/workstation MAC addresses must never be committed to the public repository or packaged in an APK.
+The APK contains only administrator public keys. Private keys and private derivation/recovery material must never be committed to the public repository or packaged in an APK. The development roots have no runtime revocation switch; replacing one requires a code and APK update.
 
 ## Reporting a vulnerability
 

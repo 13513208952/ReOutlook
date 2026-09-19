@@ -2,54 +2,36 @@ package io.github.reoutlook;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.net.Uri;
 import android.util.Base64;
 
 import org.json.JSONObject;
 
 import java.nio.charset.StandardCharsets;
-import java.security.KeyFactory;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
-import java.security.Signature;
-import java.security.spec.X509EncodedKeySpec;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.Set;
 import java.util.UUID;
 
 /** One-use ADB authorization with either an administrator signature or owner credential. */
 final class ReBrowserAdminAuthorizer {
-    static final String OP_OPEN_URL = "OPEN_URL";
-    static final String OP_NEW_WORKSPACE = "NEW_WORKSPACE";
-    static final String OP_NEW_CHILD_TAB = "NEW_CHILD_TAB";
-    static final String OP_SHOW_WORKSPACES = "SHOW_WORKSPACES";
-    static final String OP_SHOW_CHILD_TABS = "SHOW_CHILD_TABS";
-    static final String OP_OPEN_SETTINGS = "OPEN_SETTINGS";
-    static final String OP_SWITCH_TO_OUTLOOK = "SWITCH_TO_OUTLOOK";
-    static final String OP_GET_STATE = "GET_STATE";
-    static final String OP_SET_HOME = "SET_HOME";
-
-    private static final Set<String> OPERATIONS = new HashSet<>(Arrays.asList(
-            OP_OPEN_URL,
-            OP_NEW_WORKSPACE,
-            OP_NEW_CHILD_TAB,
-            OP_SHOW_WORKSPACES,
-            OP_SHOW_CHILD_TABS,
-            OP_OPEN_SETTINGS,
-            OP_SWITCH_TO_OUTLOOK,
-            OP_GET_STATE,
-            OP_SET_HOME));
+    static final String OP_OPEN_URL = ReBrowserAdminProtocol.OP_OPEN_URL;
+    static final String OP_NEW_WORKSPACE = ReBrowserAdminProtocol.OP_NEW_WORKSPACE;
+    static final String OP_NEW_CHILD_TAB = ReBrowserAdminProtocol.OP_NEW_CHILD_TAB;
+    static final String OP_SHOW_WORKSPACES = ReBrowserAdminProtocol.OP_SHOW_WORKSPACES;
+    static final String OP_SHOW_CHILD_TABS = ReBrowserAdminProtocol.OP_SHOW_CHILD_TABS;
+    static final String OP_OPEN_SETTINGS = ReBrowserAdminProtocol.OP_OPEN_SETTINGS;
+    static final String OP_SWITCH_TO_OUTLOOK = ReBrowserAdminProtocol.OP_SWITCH_TO_OUTLOOK;
+    static final String OP_GET_STATE = ReBrowserAdminProtocol.OP_GET_STATE;
+    static final String OP_SET_HOME = ReBrowserAdminProtocol.OP_SET_HOME;
     private static final String PREFERENCES = "rebrowser_admin_state_v1";
     private static final String INSTALLATION_ID = "installation_id";
     private static final String PENDING_CHALLENGE = "pending_challenge";
-    private static final String LAST_RESULT = "last_result";
     private static final long CHALLENGE_LIFETIME_MS = 3 * 60_000L;
 
     private ReBrowserAdminAuthorizer() {}
 
     static String createChallenge(Context context, String encodedRequest) throws Exception {
-        JSONObject request = validateRequest(decodeRequest(encodedRequest));
+        JSONObject request = ReBrowserAdminProtocol.prepareExternalRequest(
+                decodeRequest(encodedRequest));
         SharedPreferences preferences = preferences(context);
         String installationId = preferences.getString(INSTALLATION_ID, "");
         if (installationId.isBlank()) {
@@ -60,7 +42,7 @@ final class ReBrowserAdminAuthorizer {
         new SecureRandom().nextBytes(nonce);
         long now = System.currentTimeMillis();
         JSONObject payload = new JSONObject();
-        payload.put("version", 1);
+        payload.put("version", ReBrowserAdminProtocol.VERSION);
         payload.put("request", request);
         payload.put("nonce", Base64.encodeToString(
                 nonce, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING));
@@ -73,6 +55,8 @@ final class ReBrowserAdminAuthorizer {
         if (!preferences.edit().putString(PENDING_CHALLENGE, challenge).commit()) {
             throw new IllegalStateException("Cannot persist challenge");
         }
+        ReBrowserAdminProtocol.recordStatus(context, request, "challenge-created",
+                "", "", null, null);
         return challenge;
     }
 
@@ -84,28 +68,31 @@ final class ReBrowserAdminAuthorizer {
     static JSONObject authorizeWithSignature(
             Context context,
             String challenge,
-            String signatureBase64
+            String signatureBase64,
+            String keyId
     ) throws Exception {
         JSONObject request = inspectPending(context, challenge);
         if (signatureBase64 == null || signatureBase64.isBlank()) {
             throw new SecurityException("Missing administrator signature");
         }
-        byte[] publicBytes = Base64.decode(
-                MaintenanceKeys.SIGNING_RSA_X509_BASE64, Base64.DEFAULT);
-        Signature verifier = Signature.getInstance("SHA256withRSA");
-        verifier.initVerify(KeyFactory.getInstance("RSA")
-                .generatePublic(new X509EncodedKeySpec(publicBytes)));
-        verifier.update(challenge.getBytes(StandardCharsets.UTF_8));
-        if (!verifier.verify(Base64.decode(signatureBase64, Base64.DEFAULT))) {
-            throw new SecurityException("Invalid administrator signature");
-        }
+        String verifiedKeyId = ReBrowserAdminKeys.verify(keyId, challenge, signatureBase64);
         if (!consume(context, challenge)) throw new SecurityException("Challenge already consumed");
+        request.put("_authentication", "administrator-key");
+        request.put("_keyId", verifiedKeyId);
+        ReBrowserAdminProtocol.recordStatus(context, request, "authorized",
+                "administrator-key", verifiedKeyId, null, null);
         return request;
     }
 
     static JSONObject authorizeWithOwnerCredential(Context context, String challenge) throws Exception {
         JSONObject request = inspectPending(context, challenge);
+        if (!ReBrowserAdminProtocol.ownerCredentialAllowed(request)) {
+            throw new SecurityException("This level requires an administrator root key");
+        }
         if (!consume(context, challenge)) throw new SecurityException("Challenge already consumed");
+        request.put("_authentication", "device-credential");
+        ReBrowserAdminProtocol.recordStatus(context, request, "authorized",
+                "device-credential", "", null, null);
         return request;
     }
 
@@ -113,12 +100,8 @@ final class ReBrowserAdminAuthorizer {
         preferences(context).edit().remove(PENDING_CHALLENGE).apply();
     }
 
-    static void recordResult(Context context, String result) {
-        preferences(context).edit().putString(LAST_RESULT, result == null ? "" : result).apply();
-    }
-
     static String lastResult(Context context) {
-        return preferences(context).getString(LAST_RESULT, "");
+        return ReBrowserAdminProtocol.lastResult(context);
     }
 
     private static JSONObject decodeRequest(String encodedRequest) throws Exception {
@@ -135,27 +118,12 @@ final class ReBrowserAdminAuthorizer {
         byte[] json = Base64.decode(challenge,
                 Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
         JSONObject payload = new JSONObject(new String(json, StandardCharsets.UTF_8));
-        if (payload.optInt("version") != 1
+        if (payload.optInt("version") != ReBrowserAdminProtocol.VERSION
                 || payload.optLong("expiresAt") < System.currentTimeMillis()) {
             throw new SecurityException("Challenge expired or unsupported");
         }
-        validateRequest(payload.getJSONObject("request"));
+        ReBrowserAdminProtocol.prepareRequest(payload.getJSONObject("request"));
         return payload;
-    }
-
-    private static JSONObject validateRequest(JSONObject request) throws Exception {
-        String operation = request.optString("operation", "");
-        if (!OPERATIONS.contains(operation)) throw new SecurityException("Unsupported operation");
-        if (OP_OPEN_URL.equals(operation) || OP_SET_HOME.equals(operation)) {
-            String url = request.optString("url", "");
-            Uri parsed = Uri.parse(url);
-            String scheme = parsed.getScheme();
-            if (url.length() > 8192 || parsed.getHost() == null
-                    || !("https".equalsIgnoreCase(scheme) || "http".equalsIgnoreCase(scheme))) {
-                throw new SecurityException("Only a valid HTTP(S) URL is allowed");
-            }
-        }
-        return request;
     }
 
     private static void requirePending(Context context, String challenge) {

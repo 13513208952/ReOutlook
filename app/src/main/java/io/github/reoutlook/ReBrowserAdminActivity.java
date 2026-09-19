@@ -22,6 +22,7 @@ import org.json.JSONObject;
 public final class ReBrowserAdminActivity extends Activity {
     static final String EXTRA_CHALLENGE = "challenge";
     static final String EXTRA_SIGNATURE = "signature";
+    static final String EXTRA_KEY_ID = "keyId";
     private static final int CONFIRM_DEVICE_CREDENTIAL = 7401;
 
     private String challenge;
@@ -43,19 +44,28 @@ public final class ReBrowserAdminActivity extends Activity {
         WindowStyling.apply(this, createAndSetContent());
         challenge = getIntent().getStringExtra(EXTRA_CHALLENGE);
         String signature = getIntent().getStringExtra(EXTRA_SIGNATURE);
+        String keyId = getIntent().getStringExtra(EXTRA_KEY_ID);
         try {
             if (signature != null && !signature.isBlank()) {
                 pendingRequest = ReBrowserAdminAuthorizer.authorizeWithSignature(
-                        this, challenge, signature);
-                executeAuthorizedRequest("管理员密钥");
+                        this, challenge, signature, keyId);
+                executeAuthorizedRequest();
             } else {
                 pendingRequest = ReBrowserAdminAuthorizer.inspectPending(this, challenge);
                 showOwnerAuthentication();
             }
         } catch (Exception error) {
             status.setText("ReBrowser 管理员授权无效或已经过期。\n\n" + error.getMessage());
-            ReBrowserAdminProvider.recordResult(this,
-                    "authorization-failed:" + error.getClass().getSimpleName());
+            if (pendingRequest == null) {
+                try {
+                    pendingRequest = ReBrowserAdminAuthorizer.inspectPending(this, challenge);
+                } catch (Exception ignored) {
+                    // A malformed or non-pending challenge has no trusted request ID to report.
+                }
+            }
+            recordFailure("authorization-failed:" + error.getClass().getSimpleName());
+            ReBrowserAdminAuthorizer.clearPendingChallenge(this);
+            commandExecuted = true;
         }
     }
 
@@ -87,19 +97,37 @@ public final class ReBrowserAdminActivity extends Activity {
 
     private void showOwnerAuthentication() throws Exception {
         String operation = pendingRequest.getString("operation");
+        int level = pendingRequest.optInt("authorizationLevel", 1);
+        String target = pendingRequest.has("workspaceId")
+                ? "\n总标签页：" + pendingRequest.optString("workspaceId") : "";
+        if (pendingRequest.has("tabId")) {
+            target += "\n子标签页：" + pendingRequest.optString("tabId");
+        }
         status.setText("ADB 请求尚未获得管理员密钥签名。\n\n请求操作：" + operation
-                + "\n\n可以改用本机系统级锁屏凭据批准这一次操作。"
-                + "未通过验证时不会控制浏览器。");
+                + "\n授权级别：" + level + target
+                + (level >= 2 ? "\n\n这是会改变或删除浏览器状态的操作。" : "")
+                + (level >= 3
+                        ? "\n\n第三级操作至少需要永久管理员根密钥，不能仅由机主确认。"
+                        : "\n\n可以改用本机系统级锁屏凭据批准这一次操作。"
+                                + "未通过验证时不会控制浏览器。"));
         LinearLayout root = (LinearLayout) status.getParent();
-        Button approve = new Button(this);
-        approve.setText("使用系统锁屏凭据确认");
-        approve.setFilterTouchesWhenObscured(true);
-        approve.setOnClickListener(view -> requestOwnerCredential());
-        root.addView(approve, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(54)));
+        if (level < 3) {
+            Button approve = new Button(this);
+            approve.setText("使用系统锁屏凭据确认");
+            approve.setFilterTouchesWhenObscured(true);
+            approve.setOnClickListener(view -> requestOwnerCredential());
+            root.addView(approve, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(54)));
+        }
         Button cancel = new Button(this);
         cancel.setText("拒绝并退出");
-        cancel.setOnClickListener(view -> finish());
+        cancel.setOnClickListener(view -> {
+            ReBrowserAdminProtocol.recordStatus(this, pendingRequest, "cancelled",
+                    "device-credential", "", null, "owner-declined");
+            ReBrowserAdminAuthorizer.clearPendingChallenge(this);
+            commandExecuted = true;
+            finish();
+        });
         LinearLayout.LayoutParams cancelParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(54));
         cancelParams.setMargins(0, dp(10), 0, 0);
@@ -129,54 +157,79 @@ public final class ReBrowserAdminActivity extends Activity {
         awaitingCredential = false;
         if (resultCode != RESULT_OK) {
             status.setText("机主验证已取消。一次性请求未执行。");
-            ReBrowserAdminProvider.recordResult(this, "device-credential-cancelled");
+            ReBrowserAdminProtocol.recordStatus(this, pendingRequest, "cancelled",
+                    "device-credential", "", null, "device-credential-cancelled");
+            ReBrowserAdminAuthorizer.clearPendingChallenge(this);
+            commandExecuted = true;
             return;
         }
         try {
             pendingRequest = ReBrowserAdminAuthorizer.authorizeWithOwnerCredential(
                     this, challenge);
-            executeAuthorizedRequest("系统锁屏凭据");
+            executeAuthorizedRequest();
         } catch (Exception error) {
             status.setText("一次性请求已经失效：" + error.getMessage());
-            ReBrowserAdminProvider.recordResult(this,
-                    "authorization-failed:" + error.getClass().getSimpleName());
+            recordFailure("authorization-failed:" + error.getClass().getSimpleName());
+            ReBrowserAdminAuthorizer.clearPendingChallenge(this);
+            commandExecuted = true;
         }
     }
 
-    private void executeAuthorizedRequest(String authentication) throws Exception {
+    private void executeAuthorizedRequest() throws Exception {
         String operation = pendingRequest.getString("operation");
         commandExecuted = true;
-        ReBrowserAdminProvider.recordResult(this,
-                "authorized:" + authentication + ":" + operation);
-        if (ReBrowserAdminAuthorizer.OP_SET_HOME.equals(operation)) {
+        String authentication = pendingRequest.optString("_authentication");
+        String keyId = pendingRequest.optString("_keyId");
+        if (ReBrowserAdminProtocol.OP_SET_HOME.equals(operation)) {
             new ReBrowserPreferences(this).setHomeUrl(pendingRequest.getString("url"));
-            ReBrowserAdminProvider.recordResult(this, "completed:SET_HOME");
+            ReBrowserAdminProtocol.recordStatus(this, pendingRequest, "completed",
+                    authentication, keyId, new JSONObject().put("homeUpdated", true), null);
             status.setText("主页设置已更新。此次授权已经失效。");
             status.postDelayed(this::finish, 900);
             return;
         }
-        if (ReBrowserAdminAuthorizer.OP_SWITCH_TO_OUTLOOK.equals(operation)) {
-            ReBrowserAdminProvider.recordResult(this, "completed:SWITCH_TO_OUTLOOK");
+        if (ReBrowserAdminProtocol.OP_GET_AUDIT.equals(operation)) {
+            JSONObject details = new JSONObject();
+            details.put("entries", ReBrowserAdminProtocol.audit(this));
+            ReBrowserAdminProtocol.recordStatus(this, pendingRequest, "completed",
+                    authentication, keyId, details, null);
+            status.setText("管理员审计快照已更新。此次授权已经失效。");
+            status.postDelayed(this::finish, 500);
+            return;
+        }
+        if (ReBrowserAdminProtocol.OP_SWITCH_TO_OUTLOOK.equals(operation)) {
+            ReBrowserAdminProtocol.recordStatus(this, pendingRequest, "completed",
+                    authentication, keyId, new JSONObject().put("mode", "ReOutlook"), null);
             ModeRouter.openOutlook(this);
             finish();
             return;
         }
+        ReBrowserAdminProtocol.recordStatus(this, pendingRequest, "queued",
+                authentication, keyId, null, null);
         Intent browser = new Intent(this, ReBrowserActivity.class)
                 .setAction(ReBrowserActivity.ACTION_ADMIN_COMMAND)
-                .putExtra(ReBrowserActivity.EXTRA_ADMIN_OPERATION, operation)
+                .putExtra(ReBrowserActivity.EXTRA_ADMIN_REQUEST, pendingRequest.toString())
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                         | Intent.FLAG_ACTIVITY_CLEAR_TOP
                         | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        if (pendingRequest.has("url")) {
-            browser.putExtra(ReBrowserActivity.EXTRA_ADMIN_URL, pendingRequest.getString("url"));
-        }
         startActivity(browser);
         finish();
+    }
+
+    private void recordFailure(String message) {
+        if (pendingRequest == null) return;
+        ReBrowserAdminProtocol.recordStatus(this, pendingRequest, "failed",
+                pendingRequest.optString("_authentication"), pendingRequest.optString("_keyId"),
+                null, message);
     }
 
     @Override
     protected void onDestroy() {
         if (!awaitingCredential && !commandExecuted) {
+            if (pendingRequest != null) {
+                ReBrowserAdminProtocol.recordStatus(this, pendingRequest, "cancelled",
+                        "device-credential", "", null, "authorization-screen-closed");
+            }
             ReBrowserAdminAuthorizer.clearPendingChallenge(this);
         }
         super.onDestroy();

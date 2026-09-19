@@ -144,9 +144,11 @@ application. ReOutlook applies the equivalent policy using the Outlook mailbox l
 
 ## Administrator development control
 
-The ADB-only ReBrowser bridge accepts a single-use command after either an authorized administrator
-signature or foreground system-lock confirmation. This deliberately does not weaken ReOutlook's
-stricter mail-export rule. The protocol and bounded command set are documented in
+The ADB-only ReBrowser protocol-v2 bridge provides per-request structured results, object-ID
+control, load waiting, lifecycle operations, diagnostics, bounded audit metadata, and invariant
+repair. Either immutable root may authorize all three levels; foreground system-lock confirmation
+alone is restricted to levels one and two. This deliberately does not weaken ReOutlook's stricter
+mail-export rule. The protocol and bounded command set are documented in
 [REBROWSER_ADMIN_CONTROL.md](REBROWSER_ADMIN_CONTROL.md).
 
 Next stages include page thumbnails, a full new-tab page, favorite editing and folders, site

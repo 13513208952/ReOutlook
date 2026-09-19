@@ -9,9 +9,9 @@ the device owner to approve the exact export through Android's system lock crede
 Private keys are deliberately not stored in this repository or APK.
 
 ReOutlook mail export keeps the stricter rule: administrator signature **and** device-owner lock
-confirmation are both mandatory. ReBrowser control uses its deliberately lower development rule:
-ADB shell plus either the authorized administrator signature **or** device-owner lock confirmation.
-See [the ReBrowser control protocol](../../docs/REBROWSER_ADMIN_CONTROL.md).
+confirmation are both mandatory. ReBrowser protocol v2 uses three authorization levels: either
+immutable administrator root may independently authorize every level; the device owner may approve
+only level one or two. See [the ReBrowser control protocol](../../docs/REBROWSER_ADMIN_CONTROL.md).
 
 ## Required private keys
 
@@ -41,22 +41,30 @@ A normal app launch also clears stale maintenance challenges.
 
 ## Control ReBrowser
 
-The key-authorized path is noninteractive:
+The existing ReOutlook RSA root and the dedicated ReBrowser ECDSA root are both accepted. Select
+the matching key ID and private-key path explicitly:
 
 ```bash
-python3 tools/admin/rebrowser_admin.py state --auth key
-python3 tools/admin/rebrowser_admin.py open https://example.com/ --auth key
+export REBROWSER_ROOT_PRIVATE_KEY=/secure/path/rebrowser-root-v1-private.pem
+python3 tools/admin/rebrowser_admin.py capabilities --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py state --key-id rebrowser-root-v1 --compact
+python3 tools/admin/rebrowser_admin.py open https://www.baidu.com/ \
+  --workspace WORKSPACE_ID --tab TAB_ID --wait --key-id rebrowser-root-v1
 ```
 
+Protocol v2 provides per-request structured results, object-ID targeting, bounded load waits,
+lifecycle control, diagnostics, audit metadata, settings, validation, and root-only repair. Commands
+that close or delete an object require `--confirm-delete`.
+
 The owner-authorized alternative does not require a private key, but the owner must confirm the
-one-use command on the phone:
+exact level-one or level-two command on the phone. Level three rejects owner-only authorization:
 
 ```bash
 python3 tools/admin/rebrowser_admin.py new-tab --auth device
 ```
 
-Run `python3 tools/admin/rebrowser_admin.py --help` for the bounded command set. It does not expose
-Cookie, tokens, Web Storage, arbitrary JavaScript execution, or ReOutlook mail data.
+Run `python3 tools/admin/rebrowser_admin.py --help` for the complete bounded command set. It does not
+expose Cookie, tokens, Web Storage, arbitrary JavaScript execution, or ReOutlook mail data.
 
 ## Decrypt an approved export
 
@@ -78,4 +86,6 @@ Outlook cookies, passwords, access tokens, refresh tokens, or Web Storage.
 - Signatures cover the installation ID, exact operation and arguments, nonce, expiry, and—where relevant—the target account.
 - The administrator signing key authorizes an operation; a separate RSA key encrypts exports.
 - ReOutlook export authorization alone cannot bypass the foreground system lock credential prompt.
-- ReBrowser commands instead accept either the administrator key or the foreground device credential.
+- Either immutable root can authorize every ReBrowser level without an additional owner prompt.
+- Foreground device credential alone is limited to ReBrowser authorization levels one and two.
+- Other trusted keys can only be added with explicit scopes in source code and a new APK.
