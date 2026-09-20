@@ -77,8 +77,8 @@ public final class ReBrowserActivity extends Activity {
     private static final int MAX_PENDING_DOWNLOADS_PER_SITE = 8;
     private static final long DOUBLE_BACK_INTERVAL_MS = 2_000L;
 
-    private final List<ReBrowserStore.Workspace> workspaces = new ArrayList<>();
-    private final List<ReBrowserStore.Workspace> shelvedSecondaryWorkspaces = new ArrayList<>();
+    private List<ReBrowserStore.Workspace> workspaces = List.of();
+    private List<ReBrowserStore.Workspace> shelvedSecondaryWorkspaces = List.of();
     private final List<ReBrowserFavorites.Favorite> bookmarks = new ArrayList<>();
     private final List<ReBrowserDownloads.Record> downloads = new ArrayList<>();
     private final Map<String, WebView> tabWebViews = new HashMap<>();
@@ -93,11 +93,10 @@ public final class ReBrowserActivity extends Activity {
     private final Set<String> customDownloadIds = new java.util.HashSet<>();
     private final Map<String, JSONObject> pendingAdminLoads = new HashMap<>();
 
-    private ReBrowserStore store;
+    private ReBrowserWorkspaceController workspaceController;
     private ReBrowserPreferences browserPreferences;
     private ReBrowserFavorites bookmarkStore;
     private ReBrowserDownloads downloadStore;
-    private ReBrowserStore.Workspace activeWorkspace;
     private FrameLayout root;
     private FrameLayout webContainer;
     private LinearLayout browserToolbar;
@@ -127,7 +126,9 @@ public final class ReBrowserActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         SystemBackDispatcher.register(this, this::handleSystemBack);
-        store = new ReBrowserStore(this);
+        workspaceController = new ReBrowserWorkspaceController(new ReBrowserStore(this));
+        workspaces = workspaceController.activeWorkspaces();
+        shelvedSecondaryWorkspaces = workspaceController.shelvedWorkspaces();
         browserPreferences = new ReBrowserPreferences(this);
         fullscreenController = new ReBrowserFullscreenController(this, browserPreferences);
         fullscreenController.applyGlobalOrientationPreference();
@@ -147,11 +148,8 @@ public final class ReBrowserActivity extends Activity {
         }
 
         deletePendingProfiles();
-        workspaces.addAll(store.loadPersistentWorkspaces());
-        shelvedSecondaryWorkspaces.addAll(store.loadShelvedSecondaryWorkspaces(workspaces));
-        if (workspaces.isEmpty()) workspaces.add(newTemporaryWorkspace());
-        activeWorkspace = chooseInitialWorkspace();
-        activateWorkspace(activeWorkspace);
+        workspaceController.initialize(browserPreferences.homeUrl());
+        activateWorkspace(activeWorkspace());
         handleAdminCommand(getIntent());
     }
 
@@ -248,8 +246,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void openWorkspaceBookmark(ReBrowserStore.Workspace workspace, boolean shelved) {
-        if (shelved && !store.restoreSecondary(
-                workspace, workspaces, shelvedSecondaryWorkspaces)) {
+        if (shelved && !workspaceController.restoreSecondary(workspace)) {
             toast("无法恢复副总标签页");
             return;
         }
@@ -263,7 +260,7 @@ public final class ReBrowserActivity extends Activity {
                 .setMessage("此副总标签页已经收起。取消上锁会将“" + workspace.title
                         + "”移出书签栏；由于它当前已关闭，其子标签页和网站 Profile 将被清除。")
                 .setPositiveButton("移出并删除", (dialog, which) -> {
-                    store.deleteShelvedSecondary(workspace, shelvedSecondaryWorkspaces);
+                    workspaceController.deleteShelvedSecondary(workspace);
                     deleteProfileIfPossible(workspace.profileName);
                     if (workspaceBookmarkOverviewVisible) showWorkspaceBookmarkOverview();
                 })
@@ -287,8 +284,8 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void updateChromeUi() {
-        if (activeWorkspace == null) return;
-        ReBrowserStore.Tab activeTab = activeWorkspace.activeTab();
+        if (activeWorkspace() == null) return;
+        ReBrowserStore.Tab activeTab = activeWorkspace().activeTab();
         workspaceCountButton.setText(Integer.toString(workspaces.size()));
         workspaceCountButton.setContentDescription(
                 workspaces.size() + " 个总标签页；管理总标签页");
@@ -296,9 +293,9 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void activateWorkspace(ReBrowserStore.Workspace workspace) {
-        if (workspace == activeWorkspace && !tabWebViews.isEmpty()) return;
-        if (activeWorkspace != null && workspace != activeWorkspace) {
-            for (ReBrowserStore.Tab tab : activeWorkspace.tabs) {
+        if (workspace == activeWorkspace() && !tabWebViews.isEmpty()) return;
+        if (activeWorkspace() != null && workspace != activeWorkspace()) {
+            for (ReBrowserStore.Tab tab : activeWorkspace().tabs) {
                 JSONObject pending = pendingAdminLoads.remove(tab.id);
                 if (pending != null) {
                     recordAdminStatus(pending, "failed", null, "workspace-deactivated");
@@ -307,22 +304,23 @@ public final class ReBrowserActivity extends Activity {
         }
         saveCurrentTabStates();
         destroyTabWebViews();
-        activeWorkspace = workspace;
+        if (!workspaceController.activate(workspace)) return;
         ReBrowserStore.Tab tab = workspace.activeTab();
-        if (tab == null) tab = store.addTab(workspace, browserPreferences.homeUrl());
+        if (tab == null) tab = workspaceController.addTab(
+                workspace, browserPreferences.homeUrl());
         if (tab != null) showTab(tab);
         saveWorkspaceMetadata();
         updateChromeUi();
     }
 
     private void showTab(ReBrowserStore.Tab tab) {
-        if (activeWorkspace == null || !activeWorkspace.tabs.contains(tab)) return;
+        if (activeWorkspace() == null || !activeWorkspace().tabs.contains(tab)) return;
         saveVisibleTabState();
-        activeWorkspace.activeTabId = tab.id;
+        workspaceController.selectTab(activeWorkspace(), tab);
         WebView webView = tabWebViews.get(tab.id);
         if (webView == null) {
             try {
-                webView = createBrowserWebView(activeWorkspace.profileName, tab);
+                webView = createBrowserWebView(activeWorkspace().profileName, tab);
             } catch (Throwable error) {
                 showProfileFailure(error);
                 return;
@@ -396,10 +394,10 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void navigateActiveTab(String input) {
-        ReBrowserStore.Tab tab = activeWorkspace == null ? null : activeWorkspace.activeTab();
+        ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
         if (tab == null) return;
         String url = normalizeAddress(input);
-        tab.url = url;
+        workspaceController.updateTab(tab, url, null);
         WebView webView = tabWebViews.get(tab.id);
         if (webView == null) showTab(tab);
         else webView.loadUrl(url);
@@ -409,7 +407,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void toggleCurrentBookmark() {
-        ReBrowserStore.Tab tab = activeWorkspace == null ? null : activeWorkspace.activeTab();
+        ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
         if (tab == null) return;
         WebView webView = activeWebView();
         String url = webView == null || webView.getUrl() == null ? tab.url : webView.getUrl();
@@ -423,7 +421,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void addCurrentBookmark() {
-        ReBrowserStore.Tab tab = activeWorkspace == null ? null : activeWorkspace.activeTab();
+        ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
         if (tab == null) return;
         WebView webView = activeWebView();
         String url = webView == null || webView.getUrl() == null ? tab.url : webView.getUrl();
@@ -485,8 +483,9 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void createChildTab(boolean activate) {
-        if (activeWorkspace == null) return;
-        ReBrowserStore.Tab tab = store.addTab(activeWorkspace, browserPreferences.homeUrl());
+        if (activeWorkspace() == null) return;
+        ReBrowserStore.Tab tab = workspaceController.addTab(
+                activeWorkspace(), browserPreferences.homeUrl());
         if (tab == null) {
             toast("每个总标签页最多 50 个子标签页");
             return;
@@ -501,22 +500,14 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void createTemporaryWorkspace() {
-        if (workspaces.size() + shelvedSecondaryWorkspaces.size()
-                >= ReBrowserStore.MAX_WORKSPACES) {
+        ReBrowserStore.Workspace workspace = workspaceController.createTemporary(
+                browserPreferences.homeUrl());
+        if (workspace == null) {
             toast("当前与书签栏中的总标签页数量已达到上限");
             return;
         }
-        ReBrowserStore.Workspace workspace = newTemporaryWorkspace();
-        workspaces.add(workspace);
         hideOverview();
         activateWorkspace(workspace);
-    }
-
-    private ReBrowserStore.Workspace newTemporaryWorkspace() {
-        ReBrowserStore.Workspace workspace = store.createTemporaryWorkspace();
-        ReBrowserStore.Tab tab = workspace.activeTab();
-        if (tab != null) tab.url = browserPreferences.homeUrl();
-        return workspace;
     }
 
     private void handleAdminCommand(Intent intent) {
@@ -554,17 +545,14 @@ public final class ReBrowserActivity extends Activity {
         if (ReBrowserAdminProtocol.OP_GET_DOWNLOADS.equals(operation)) {
             return createAdminDownloads();
         }
-        if (activeWorkspace == null) throw new IllegalStateException("ReBrowser-disabled");
+        if (activeWorkspace() == null) throw new IllegalStateException("ReBrowser-disabled");
         if (ReBrowserAdminProtocol.OP_GET_STATE.equals(operation)) return createAdminState();
         if (ReBrowserAdminProtocol.OP_VALIDATE_STATE.equals(operation)) return validateAdminState();
         if (ReBrowserAdminProtocol.OP_REPAIR_STATE.equals(operation)) return repairAdminState();
         if (ReBrowserAdminProtocol.OP_NEW_WORKSPACE.equals(operation)) {
-            if (workspaces.size() + shelvedSecondaryWorkspaces.size()
-                    >= ReBrowserStore.MAX_WORKSPACES) {
-                throw new IllegalStateException("workspace-limit-reached");
-            }
-            ReBrowserStore.Workspace workspace = newTemporaryWorkspace();
-            workspaces.add(workspace);
+            ReBrowserStore.Workspace workspace = workspaceController.createTemporary(
+                    browserPreferences.homeUrl());
+            if (workspace == null) throw new IllegalStateException("workspace-limit-reached");
             hideOverview();
             activateWorkspace(workspace);
             return adminTargetDetails(workspace, workspace.activeTab());
@@ -572,7 +560,8 @@ public final class ReBrowserActivity extends Activity {
         if (ReBrowserAdminProtocol.OP_NEW_CHILD_TAB.equals(operation)) {
             ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
             activateWorkspace(workspace);
-            ReBrowserStore.Tab tab = store.addTab(workspace, browserPreferences.homeUrl());
+            ReBrowserStore.Tab tab = workspaceController.addTab(
+                    workspace, browserPreferences.homeUrl());
             if (tab == null) throw new IllegalStateException("child-tab-limit-reached");
             hideOverview();
             showTab(tab);
@@ -619,7 +608,7 @@ public final class ReBrowserActivity extends Activity {
         if (isAdminNavigationOperation(operation)) return executeAdminNavigation(request);
         if (ReBrowserAdminProtocol.OP_LOCK_SECONDARY.equals(operation)) {
             ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            if (!store.lockAsSecondary(workspace, workspaces)) {
+            if (!workspaceController.lockAsSecondary(workspace)) {
                 throw new IllegalStateException("workspace-cannot-lock");
             }
             refreshLifecycleUi();
@@ -627,7 +616,7 @@ public final class ReBrowserActivity extends Activity {
         }
         if (ReBrowserAdminProtocol.OP_UNLOCK_TEMPORARY.equals(operation)) {
             ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            if (!store.unlockToTemporary(workspace, workspaces)) {
+            if (!workspaceController.unlockToTemporary(workspace)) {
                 throw new IllegalStateException("workspace-cannot-unlock");
             }
             refreshLifecycleUi();
@@ -635,8 +624,8 @@ public final class ReBrowserActivity extends Activity {
         }
         if (ReBrowserAdminProtocol.OP_PROMOTE_PRIMARY.equals(operation)) {
             ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            if (!store.promoteToPrimary(workspace, workspaces,
-                    browserPreferences.forcePrimaryPromotionEnabled())) {
+            if (!workspaceController.promoteToPrimary(
+                    workspace, browserPreferences.forcePrimaryPromotionEnabled())) {
                 throw new IllegalStateException("workspace-cannot-promote");
             }
             refreshLifecycleUi();
@@ -644,7 +633,7 @@ public final class ReBrowserActivity extends Activity {
         }
         if (ReBrowserAdminProtocol.OP_DEMOTE_SECONDARY.equals(operation)) {
             ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            if (!store.demotePrimaryToSecondary(workspace, workspaces)) {
+            if (!workspaceController.demotePrimaryToSecondary(workspace)) {
                 throw new IllegalStateException("workspace-cannot-demote");
             }
             refreshLifecycleUi();
@@ -661,9 +650,7 @@ public final class ReBrowserActivity extends Activity {
         }
         if (ReBrowserAdminProtocol.OP_RESTORE_WORKSPACE.equals(operation)) {
             ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, true);
-            if (!shelvedSecondaryWorkspaces.contains(workspace)
-                    || !store.restoreSecondary(workspace, workspaces,
-                            shelvedSecondaryWorkspaces)) {
+            if (!workspaceController.restoreSecondary(workspace)) {
                 throw new IllegalStateException("workspace-cannot-restore");
             }
             hideOverview();
@@ -736,10 +723,9 @@ public final class ReBrowserActivity extends Activity {
         }
         if (ReBrowserAdminProtocol.OP_DELETE_SHELVED.equals(operation)) {
             ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, true);
-            if (!shelvedSecondaryWorkspaces.contains(workspace)) {
+            if (!workspaceController.deleteShelvedSecondary(workspace)) {
                 throw new IllegalStateException("shelved-workspace-not-found");
             }
-            store.deleteShelvedSecondary(workspace, shelvedSecondaryWorkspaces);
             deleteProfileIfPossible(workspace.profileName);
             return new JSONObject().put("workspaceId", workspace.id).put("deleted", true);
         }
@@ -823,7 +809,7 @@ public final class ReBrowserActivity extends Activity {
                 }
             }
         }
-        if (workspaceId.isBlank() && !shelvedOnly) return activeWorkspace;
+        if (workspaceId.isBlank() && !shelvedOnly) return activeWorkspace();
         List<ReBrowserStore.Workspace> source = shelvedOnly
                 ? shelvedSecondaryWorkspaces : workspaces;
         for (ReBrowserStore.Workspace workspace : source) {
@@ -903,8 +889,8 @@ public final class ReBrowserActivity extends Activity {
         value.put("webViewVersion", provider == null ? "" : provider.versionName);
         value.put("multiProfile",
                 WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE));
-        value.put("activeWorkspaceId", activeWorkspace == null ? "" : activeWorkspace.id);
-        ReBrowserStore.Tab tab = activeWorkspace == null ? null : activeWorkspace.activeTab();
+        value.put("activeWorkspaceId", activeWorkspace() == null ? "" : activeWorkspace().id);
+        ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
         value.put("activeTabId", tab == null ? "" : tab.id);
         value.put("activeOrigin", tab == null ? "" : safeOrigin(tab.url));
         value.put("loading", tab != null && loadingTabIds.contains(tab.id));
@@ -918,8 +904,8 @@ public final class ReBrowserActivity extends Activity {
         value.put("videoOrientation", browserPreferences.videoOrientation());
         value.put("activeWorkspaceCount", workspaces.size());
         value.put("shelvedWorkspaceCount", shelvedSecondaryWorkspaces.size());
-        value.put("pendingProfileDeletionCount", store == null
-                ? 0 : store.pendingProfileDeletions().size());
+        value.put("pendingProfileDeletionCount",
+                workspaceController.pendingProfileDeletions().size());
         value.put("downloadRecordCount", downloads.size());
         value.put("downloadsEnabled", downloadStore.downloadsEnabled());
         value.put("pendingDownloadCount", pendingDownloadCount(null));
@@ -1054,7 +1040,7 @@ public final class ReBrowserActivity extends Activity {
     private JSONObject createAdminState() throws Exception {
         JSONObject state = new JSONObject();
         state.put("version", 2);
-        state.put("activeWorkspaceId", activeWorkspace == null ? "" : activeWorkspace.id);
+        state.put("activeWorkspaceId", activeWorkspace() == null ? "" : activeWorkspace().id);
         state.put("workspaces", createAdminWorkspaceValues(workspaces));
         state.put("shelvedSecondaries",
                 createAdminWorkspaceValues(shelvedSecondaryWorkspaces));
@@ -1094,6 +1080,7 @@ public final class ReBrowserActivity extends Activity {
         Set<String> workspaceIds = new java.util.HashSet<>();
         Set<String> tabIds = new java.util.HashSet<>();
         int primaryCount = 0;
+        Set<String> pendingProfileDeletions = workspaceController.pendingProfileDeletions();
         for (ReBrowserStore.Workspace workspace : workspaces) {
             if (!workspaceIds.add(workspace.id)) issues.put("duplicate-workspace:" + workspace.id);
             if (workspace.level == ReBrowserStore.Level.PRIMARY) primaryCount++;
@@ -1102,7 +1089,7 @@ public final class ReBrowserActivity extends Activity {
                 if (!tabIds.add(tab.id)) issues.put("duplicate-tab:" + tab.id);
             }
             if (workspace.level != ReBrowserStore.Level.TEMPORARY
-                    && store.pendingProfileDeletions().contains(workspace.profileName)) {
+                    && pendingProfileDeletions.contains(workspace.profileName)) {
                 issues.put("persistent-profile-pending-deletion:" + workspace.id);
             }
         }
@@ -1111,7 +1098,7 @@ public final class ReBrowserActivity extends Activity {
             if (workspace.level != ReBrowserStore.Level.SECONDARY) {
                 issues.put("invalid-shelved-level:" + workspace.id);
             }
-            if (store.pendingProfileDeletions().contains(workspace.profileName)) {
+            if (pendingProfileDeletions.contains(workspace.profileName)) {
                 issues.put("shelved-profile-pending-deletion:" + workspace.id);
             }
             for (ReBrowserStore.Tab tab : workspace.tabs) {
@@ -1128,23 +1115,23 @@ public final class ReBrowserActivity extends Activity {
 
     private JSONObject repairAdminState() throws Exception {
         int cancelledDeletionMarkers = 0;
+        Set<String> pendingProfileDeletions = workspaceController.pendingProfileDeletions();
         for (ReBrowserStore.Workspace workspace : workspaces) {
             workspace.activeTab();
             if (workspace.level != ReBrowserStore.Level.TEMPORARY
-                    && store.pendingProfileDeletions().contains(workspace.profileName)) {
-                store.unmarkProfileForDeletion(workspace.profileName);
+                    && pendingProfileDeletions.contains(workspace.profileName)) {
+                workspaceController.unmarkProfileForDeletion(workspace.profileName);
                 cancelledDeletionMarkers++;
             }
         }
         for (ReBrowserStore.Workspace workspace : shelvedSecondaryWorkspaces) {
             workspace.activeTab();
-            if (store.pendingProfileDeletions().contains(workspace.profileName)) {
-                store.unmarkProfileForDeletion(workspace.profileName);
+            if (pendingProfileDeletions.contains(workspace.profileName)) {
+                workspaceController.unmarkProfileForDeletion(workspace.profileName);
                 cancelledDeletionMarkers++;
             }
         }
-        store.save(workspaces);
-        store.saveShelvedSecondaryWorkspaces(shelvedSecondaryWorkspaces);
+        workspaceController.saveAll();
         return new JSONObject().put("cancelledDeletionMarkers", cancelledDeletionMarkers)
                 .put("validation", validateAdminState());
     }
@@ -1182,7 +1169,7 @@ public final class ReBrowserActivity extends Activity {
         if (request == null || !request.optBoolean("_loadStarted", false)) return;
         pendingAdminLoads.remove(tab.id);
         try {
-            JSONObject details = adminTargetDetails(activeWorkspace, tab);
+            JSONObject details = adminTargetDetails(activeWorkspace(), tab);
             details.put("origin", safeOrigin(tab.url));
             details.put("title", tab.title);
             details.put("loadProgress", tabLoadProgress.getOrDefault(tab.id, 0));
@@ -1229,20 +1216,20 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void closeTab(ReBrowserStore.Tab tab) {
-        if (activeWorkspace == null || !activeWorkspace.tabs.contains(tab)) return;
+        ReBrowserStore.Workspace workspace = activeWorkspace();
+        if (workspace == null || !workspace.tabs.contains(tab)) return;
         JSONObject pendingLoad = pendingAdminLoads.remove(tab.id);
         if (pendingLoad != null) {
             recordAdminStatus(pendingLoad, "failed", null, "tab-closed-during-load");
         }
-        if (activeWorkspace.tabs.size() == 1) {
-            tab.title = "新子标签页";
-            tab.url = browserPreferences.homeUrl();
+        ReBrowserWorkspaceController.TabCloseResult result = workspaceController.closeTab(
+                workspace, tab, browserPreferences.homeUrl());
+        if (!result.valid) return;
+        if (result.resetOnly) {
             WebView current = tabWebViews.get(tab.id);
             if (current != null) current.loadUrl(tab.url);
             loadedTabIds.add(tab.id);
         } else {
-            int oldIndex = activeWorkspace.tabs.indexOf(tab);
-            activeWorkspace.tabs.remove(tab);
             WebView removed = tabWebViews.remove(tab.id);
             webViewTabs.remove(removed);
             loadedTabIds.remove(tab.id);
@@ -1252,21 +1239,17 @@ public final class ReBrowserActivity extends Activity {
                 }
                 removed.destroy();
             }
-            if (tab.id.equals(activeWorkspace.activeTabId)) {
-                int nextIndex = Math.min(oldIndex, activeWorkspace.tabs.size() - 1);
-                showTab(activeWorkspace.tabs.get(nextIndex));
-            }
+            if (result.nextActiveTab != null) showTab(result.nextActiveTab);
         }
-        saveWorkspaceMetadata();
         updateChromeUi();
         if (childOverviewVisible) showChildOverview();
     }
 
     private void showWorkspaceSettings() {
-        if (activeWorkspace == null || activeWorkspace.level == ReBrowserStore.Level.TEMPORARY) return;
+        if (activeWorkspace() == null || activeWorkspace().level == ReBrowserStore.Level.TEMPORARY) return;
         List<String> actions = new ArrayList<>();
         actions.add("重命名总标签页");
-        if (activeWorkspace.level == ReBrowserStore.Level.SECONDARY) {
+        if (activeWorkspace().level == ReBrowserStore.Level.SECONDARY) {
             actions.add("取消上锁并降级为临时总标签页");
             actions.add("提升为主总标签页");
         }
@@ -1276,9 +1259,10 @@ public final class ReBrowserActivity extends Activity {
                     if (which == 0) {
                         showRenameDialog();
                     } else if (which == 1) {
-                        unlockWorkspace(activeWorkspace);
+                        unlockWorkspace(activeWorkspace());
                     } else {
-                        if (store.promoteToPrimary(activeWorkspace, workspaces, false)) {
+                        if (workspaceController.promoteToPrimary(
+                                activeWorkspace(), false)) {
                             toast("已提升为主总标签页");
                             updateChromeUi();
                             if (workspaceOverviewVisible) showWorkspaceOverview();
@@ -1300,7 +1284,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void unlockWorkspace(ReBrowserStore.Workspace workspace) {
-        if (!store.unlockToTemporary(workspace, workspaces)) return;
+        if (!workspaceController.unlockToTemporary(workspace)) return;
         toast("已移出书签栏；关闭后将清除此临时总标签页");
         updateChromeUi();
         if (workspaceOverviewVisible) showWorkspaceOverview();
@@ -1310,7 +1294,7 @@ public final class ReBrowserActivity extends Activity {
     private void showRenameDialog() {
         EditText input = new EditText(this);
         input.setSingleLine(true);
-        input.setText(activeWorkspace.title);
+        input.setText(activeWorkspace().title);
         input.setSelectAllOnFocus(true);
         int padding = dp(20);
         FrameLayout holder = new FrameLayout(this);
@@ -1322,8 +1306,7 @@ public final class ReBrowserActivity extends Activity {
                 .setPositiveButton("保存", (dialog, which) -> {
                     String value = input.getText().toString().replaceAll("\\s+", " ").trim();
                     if (value.isEmpty()) return;
-                    activeWorkspace.title = value.substring(0, Math.min(value.length(), 160));
-                    store.save(workspaces);
+                    workspaceController.renameActiveWorkspace(value);
                     updateChromeUi();
                     if (workspaceOverviewVisible) showWorkspaceOverview();
                 })
@@ -1332,7 +1315,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void confirmCloseWorkspace() {
-        if (activeWorkspace != null) confirmCloseWorkspace(activeWorkspace);
+        if (activeWorkspace() != null) confirmCloseWorkspace(activeWorkspace());
     }
 
     private void confirmCloseWorkspace(ReBrowserStore.Workspace workspace) {
@@ -1359,21 +1342,20 @@ public final class ReBrowserActivity extends Activity {
             toast("主总标签页不能关闭");
             return;
         }
-        boolean wasActive = closing == activeWorkspace;
+        boolean wasActive = closing == activeWorkspace();
         if (wasActive) {
             saveCurrentTabStates();
             destroyTabWebViews();
         }
         if (closing.level == ReBrowserStore.Level.SECONDARY) {
-            store.shelfSecondary(closing, workspaces, shelvedSecondaryWorkspaces);
+            workspaceController.shelfSecondary(closing);
         } else {
-            store.removeWorkspace(closing, workspaces);
+            workspaceController.removeTemporary(closing);
             deleteProfileIfPossible(closing.profileName);
         }
-        if (workspaces.isEmpty()) workspaces.add(newTemporaryWorkspace());
+        workspaceController.ensureActiveWorkspace(browserPreferences.homeUrl());
         if (wasActive) {
-            activeWorkspace = chooseInitialWorkspace();
-            activateWorkspace(activeWorkspace);
+            activateWorkspace(activeWorkspace());
             hideOverview();
         } else if (workspaceOverviewVisible) {
             showWorkspaceOverview();
@@ -1381,42 +1363,25 @@ public final class ReBrowserActivity extends Activity {
         updateChromeUi();
     }
 
-    private ReBrowserStore.Workspace chooseInitialWorkspace() {
-        for (ReBrowserStore.Workspace workspace : workspaces) {
-            if (workspace.level == ReBrowserStore.Level.PRIMARY) return workspace;
-        }
-        return workspaces.get(0);
-    }
-
     private void saveVisibleTabState() {
-        if (activeWorkspace == null) return;
-        ReBrowserStore.Tab tab = activeWorkspace.activeTab();
+        if (activeWorkspace() == null) return;
+        ReBrowserStore.Tab tab = activeWorkspace().activeTab();
         WebView webView = tab == null ? null : tabWebViews.get(tab.id);
         if (tab == null || webView == null) return;
-        String url = webView.getUrl();
-        if (url != null) tab.url = ReBrowserStore.safeUrl(url);
-        String title = webView.getTitle();
-        if (title != null && !title.isBlank()) {
-            tab.title = title.substring(0, Math.min(title.length(), 160));
-        }
+        workspaceController.updateTab(tab, webView.getUrl(), webView.getTitle());
     }
 
     private void saveCurrentTabStates() {
         for (Map.Entry<WebView, ReBrowserStore.Tab> entry : webViewTabs.entrySet()) {
             WebView webView = entry.getKey();
             ReBrowserStore.Tab tab = entry.getValue();
-            String url = webView.getUrl();
-            if (url != null) tab.url = ReBrowserStore.safeUrl(url);
-            String title = webView.getTitle();
-            if (title != null && !title.isBlank()) {
-                tab.title = title.substring(0, Math.min(title.length(), 160));
-            }
+            workspaceController.updateTab(tab, webView.getUrl(), webView.getTitle());
         }
         saveWorkspaceMetadata();
     }
 
     private void saveWorkspaceMetadata() {
-        if (store != null) store.save(workspaces);
+        workspaceController.save();
     }
 
     private void destroyTabWebViews() {
@@ -1435,7 +1400,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void deletePendingProfiles() {
-        for (String profileName : store.pendingProfileDeletions()) {
+        for (String profileName : workspaceController.pendingProfileDeletions()) {
             deleteProfileIfPossible(profileName);
         }
     }
@@ -1444,7 +1409,7 @@ public final class ReBrowserActivity extends Activity {
         if (!ReBrowserStore.isOwnedProfile(profileName)) return;
         try {
             ProfileStore.getInstance().deleteProfile(profileName);
-            store.unmarkProfileForDeletion(profileName);
+            workspaceController.unmarkProfileForDeletion(profileName);
         } catch (IllegalStateException ignored) {
             // The provider can retain a recently destroyed WebView until process shutdown.
         } catch (RuntimeException ignored) {
@@ -1469,14 +1434,14 @@ public final class ReBrowserActivity extends Activity {
         String detail = error.getClass().getSimpleName();
         toast("命名 Profile 创建失败，ReBrowser 已停止：" + detail);
         destroyTabWebViews();
-        activeWorkspace = null;
+        workspaceController.clearActiveWorkspace();
         browserToolbar.setVisibility(View.GONE);
     }
 
     private void showBrowserMenu(View anchor) {
-        if (activeWorkspace == null) return;
+        if (activeWorkspace() == null) return;
         WebView webView = activeWebView();
-        ReBrowserStore.Tab tab = activeWorkspace.activeTab();
+        ReBrowserStore.Tab tab = activeWorkspace().activeTab();
         String url = webView == null || webView.getUrl() == null
                 ? tab == null ? "" : tab.url : webView.getUrl();
         boolean favorite = bookmarkStore.findByUrl(bookmarks, url) != null;
@@ -1551,18 +1516,18 @@ public final class ReBrowserActivity extends Activity {
             popup.dismiss();
             showWorkspaceBookmarkOverview();
         });
-        boolean primary = activeWorkspace.level == ReBrowserStore.Level.PRIMARY;
-        boolean temporaryPromotionAllowed = activeWorkspace.level != ReBrowserStore.Level.TEMPORARY
+        boolean primary = activeWorkspace().level == ReBrowserStore.Level.PRIMARY;
+        boolean temporaryPromotionAllowed = activeWorkspace().level != ReBrowserStore.Level.TEMPORARY
                 || browserPreferences.forcePrimaryPromotionEnabled();
         boolean primaryActionEnabled = primary
-                || temporaryPromotionAllowed && store.canPromoteToPrimary(workspaces);
+                || temporaryPromotionAllowed && workspaceController.canPromoteToPrimary();
         addMenuListItem(panel,
                 primary ? R.drawable.ic_rb_primary_cancel : R.drawable.ic_rb_primary_promote,
                 primary ? "取消主标签页" : "提升为主标签页",
                 primaryActionEnabled,
                 () -> {
                     popup.dismiss();
-                    confirmPrimaryLevelChange(activeWorkspace);
+                    confirmPrimaryLevelChange(activeWorkspace());
                 });
         panel.addView(menuDivider(), new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
@@ -1666,7 +1631,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void confirmPrimaryLevelChange(ReBrowserStore.Workspace workspace) {
-        if (workspace == null || workspace != activeWorkspace || !workspaces.contains(workspace)) {
+        if (workspace == null || workspace != activeWorkspace() || !workspaces.contains(workspace)) {
             return;
         }
         if (workspace.level == ReBrowserStore.Level.TEMPORARY
@@ -1677,7 +1642,7 @@ public final class ReBrowserActivity extends Activity {
                     .setMessage("此总标签页将降级为副总标签页并登记到书签栏；"
                             + "它仍会保留全部子标签页和原命名 Profile。")
                     .setPositiveButton("降级为副标签页", (dialog, which) -> {
-                        if (store.demotePrimaryToSecondary(workspace, workspaces)) {
+                        if (workspaceController.demotePrimaryToSecondary(workspace)) {
                             toast("已降级为副总标签页");
                             refreshLifecycleUi();
                         }
@@ -1696,7 +1661,7 @@ public final class ReBrowserActivity extends Activity {
                         : "此副总标签页将成为主总标签页；其他主总标签页不受影响。")
                 .setPositiveButton("提升", (dialog, which) -> {
                     boolean allowTemporary = browserPreferences.forcePrimaryPromotionEnabled();
-                    if (store.promoteToPrimary(workspace, workspaces, allowTemporary)) {
+                    if (workspaceController.promoteToPrimary(workspace, allowTemporary)) {
                         toast("已提升为主总标签页");
                         refreshLifecycleUi();
                     }
@@ -1800,7 +1765,7 @@ public final class ReBrowserActivity extends Activity {
         if (selectedWorkspacesContainPrimary()) return;
         int changed = 0;
         for (ReBrowserStore.Workspace workspace : selectedWorkspaces()) {
-            if (store.lockAsSecondary(workspace, workspaces)) changed++;
+            if (workspaceController.lockAsSecondary(workspace)) changed++;
         }
         workspaceSelectionMode = false;
         selectedWorkspaceIds.clear();
@@ -1813,7 +1778,7 @@ public final class ReBrowserActivity extends Activity {
         if (selectedWorkspacesContainPrimary()) return;
         int changed = 0;
         for (ReBrowserStore.Workspace workspace : selectedWorkspaces()) {
-            if (store.unlockToTemporary(workspace, workspaces)) changed++;
+            if (workspaceController.unlockToTemporary(workspace)) changed++;
         }
         workspaceSelectionMode = false;
         selectedWorkspaceIds.clear();
@@ -1835,23 +1800,22 @@ public final class ReBrowserActivity extends Activity {
     private void batchCloseSelectedWorkspaces() {
         List<ReBrowserStore.Workspace> closing = selectedWorkspaces();
         if (closing.isEmpty() || selectedWorkspacesContainPrimary()) return;
-        boolean activeClosing = closing.contains(activeWorkspace);
+        boolean activeClosing = closing.contains(activeWorkspace());
         if (activeClosing) {
             saveCurrentTabStates();
             destroyTabWebViews();
         }
         for (ReBrowserStore.Workspace workspace : closing) {
             if (workspace.level == ReBrowserStore.Level.SECONDARY) {
-                store.shelfSecondary(workspace, workspaces, shelvedSecondaryWorkspaces);
+                workspaceController.shelfSecondary(workspace);
             } else {
-                store.removeWorkspace(workspace, workspaces);
+                workspaceController.removeTemporary(workspace);
                 deleteProfileIfPossible(workspace.profileName);
             }
         }
-        if (workspaces.isEmpty()) workspaces.add(newTemporaryWorkspace());
+        workspaceController.ensureActiveWorkspace(browserPreferences.homeUrl());
         if (activeClosing) {
-            activeWorkspace = chooseInitialWorkspace();
-            activateWorkspace(activeWorkspace);
+            activateWorkspace(activeWorkspace());
         }
         workspaceSelectionMode = false;
         selectedWorkspaceIds.clear();
@@ -1860,7 +1824,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void showWorkspaceOverview() {
-        if (activeWorkspace == null) return;
+        if (activeWorkspace() == null) return;
         childSelectionMode = false;
         selectedChildTabIds.clear();
         saveCurrentTabStates();
@@ -1897,13 +1861,13 @@ public final class ReBrowserActivity extends Activity {
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(dp(14), dp(12), dp(12), dp(10));
             boolean selected = selectedWorkspaceIds.contains(workspace.id);
-            card.setElevation(selected || workspace == activeWorkspace ? dp(6) : dp(2));
+            card.setElevation(selected || workspace == activeWorkspace() ? dp(6) : dp(2));
             GradientDrawable background = roundedBackground(
                     selected ? Color.rgb(224, 218, 249)
-                            : workspace == activeWorkspace
+                            : workspace == activeWorkspace()
                                     ? Color.rgb(235, 231, 250) : Color.WHITE,
                     dp(18));
-            if (selected || workspace == activeWorkspace) {
+            if (selected || workspace == activeWorkspace()) {
                 background.setStroke(dp(2), selected
                         ? Color.rgb(74, 52, 166) : Color.rgb(91, 70, 180));
             }
@@ -1944,7 +1908,7 @@ public final class ReBrowserActivity extends Activity {
                         0, 0);
                 lock.setOnClickListener(view -> {
                     if (temporary) {
-                        if (store.lockAsSecondary(workspace, workspaces)) {
+                        if (workspaceController.lockAsSecondary(workspace)) {
                             toast("已锁定为副总标签页并加入书签栏");
                             updateChromeUi();
                             showWorkspaceOverview();
@@ -2046,9 +2010,9 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void batchCloseSelectedChildTabs() {
-        if (activeWorkspace == null) return;
+        if (activeWorkspace() == null) return;
         List<ReBrowserStore.Tab> closing = new ArrayList<>();
-        for (ReBrowserStore.Tab tab : activeWorkspace.tabs) {
+        for (ReBrowserStore.Tab tab : activeWorkspace().tabs) {
             if (selectedChildTabIds.contains(tab.id)) closing.add(tab);
         }
         childOverviewVisible = false;
@@ -2060,7 +2024,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void showChildOverview() {
-        if (activeWorkspace == null) return;
+        if (activeWorkspace() == null) return;
         workspaceSelectionMode = false;
         selectedWorkspaceIds.clear();
         saveCurrentTabStates();
@@ -2081,7 +2045,7 @@ public final class ReBrowserActivity extends Activity {
         LinearLayout page = overviewPage("子标签页",
                 childSelectionMode
                         ? "已选择 " + selectedChildTabIds.size() + " 个"
-                        : "总标签页 · " + activeWorkspace.title,
+                        : "总标签页 · " + activeWorkspace().title,
                 childSelectionMode ? null : () -> createChildTab(true),
                 childSelectionMode ? this::exitChildSelection : this::showWorkspaceOverview,
                 childSelectionMode ? "退出多选" : "返回总标签页");
@@ -2092,12 +2056,12 @@ public final class ReBrowserActivity extends Activity {
         grid.setPadding(dp(8), dp(4), dp(8), dp(28));
         int cardWidth = Math.max(dp(150),
                 (getResources().getDisplayMetrics().widthPixels - dp(40)) / 2);
-        for (ReBrowserStore.Tab tab : new ArrayList<>(activeWorkspace.tabs)) {
+        for (ReBrowserStore.Tab tab : new ArrayList<>(activeWorkspace().tabs)) {
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(dp(14), dp(12), dp(10), dp(10));
             boolean selected = selectedChildTabIds.contains(tab.id);
-            boolean active = tab.id.equals(activeWorkspace.activeTabId);
+            boolean active = tab.id.equals(activeWorkspace().activeTabId);
             card.setElevation(selected || active ? dp(6) : dp(2));
             GradientDrawable background = roundedBackground(
                     selected ? Color.rgb(224, 218, 249)
@@ -2168,7 +2132,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void showBookmarkOverview() {
-        if (activeWorkspace == null) return;
+        if (activeWorkspace() == null) return;
         saveCurrentTabStates();
         bookmarkOverviewVisible = true;
         workspaceOverviewVisible = false;
@@ -2247,7 +2211,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void showDownloadOverview() {
-        if (activeWorkspace == null) return;
+        if (activeWorkspace() == null) return;
         refreshDownloadStates();
         downloadOverviewVisible = true;
         bookmarkOverviewVisible = false;
@@ -2457,7 +2421,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void showWorkspaceBookmarkOverview() {
-        if (activeWorkspace == null) return;
+        if (activeWorkspace() == null) return;
         saveCurrentTabStates();
         workspaceBookmarkOverviewVisible = true;
         bookmarkOverviewVisible = false;
@@ -2648,8 +2612,12 @@ public final class ReBrowserActivity extends Activity {
         webContainer.setImportantForAccessibility(importance);
     }
 
+    private ReBrowserStore.Workspace activeWorkspace() {
+        return workspaceController.activeWorkspace();
+    }
+
     private WebView activeWebView() {
-        ReBrowserStore.Tab tab = activeWorkspace == null ? null : activeWorkspace.activeTab();
+        ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
         return tab == null ? null : tabWebViews.get(tab.id);
     }
 
@@ -2725,7 +2693,7 @@ public final class ReBrowserActivity extends Activity {
             keyboard.hideSoftInputFromWindow(omnibox.getWindowToken(), 0);
             return;
         }
-        ReBrowserStore.Tab tab = activeWorkspace == null ? null : activeWorkspace.activeTab();
+        ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
         WebView webView = tab == null ? null : tabWebViews.get(tab.id);
         boolean atHomepage = webView != null
                 && samePage(webView.getUrl(), browserPreferences.homeUrl());
@@ -2839,7 +2807,7 @@ public final class ReBrowserActivity extends Activity {
         public void onPageStarted(WebView view, String url, Bitmap favicon) {
             ReBrowserStore.Tab tab = webViewTabs.get(view);
             if (tab != null) {
-                tab.url = ReBrowserStore.safeUrl(url);
+                workspaceController.updateTab(tab, url, null);
                 JSONObject pending = pendingAdminLoads.get(tab.id);
                 if (pending != null) {
                     try {
@@ -2863,16 +2831,7 @@ public final class ReBrowserActivity extends Activity {
         public void onPageFinished(WebView view, String url) {
             ReBrowserStore.Tab tab = webViewTabs.get(view);
             if (tab != null) {
-                tab.url = ReBrowserStore.safeUrl(url);
-                String title = view.getTitle();
-                if (title != null && !title.isBlank()) {
-                    tab.title = title.substring(0, Math.min(title.length(), 160));
-                    if (activeWorkspace != null
-                            && activeWorkspace.level == ReBrowserStore.Level.TEMPORARY
-                            && tab.id.equals(activeWorkspace.activeTabId)) {
-                        activeWorkspace.title = tab.title;
-                    }
-                }
+                workspaceController.updatePageMetadata(tab, url, view.getTitle());
                 loadingTabIds.remove(tab.id);
                 tabLoadProgress.put(tab.id, 100);
                 saveWorkspaceMetadata();
@@ -2946,7 +2905,7 @@ public final class ReBrowserActivity extends Activity {
         public void onReceivedTitle(WebView view, String title) {
             ReBrowserStore.Tab tab = webViewTabs.get(view);
             if (tab == null || title == null || title.isBlank()) return;
-            tab.title = title.substring(0, Math.min(title.length(), 160));
+            workspaceController.updateTab(tab, null, title);
             saveWorkspaceMetadata();
             if (isVisibleWebView(view)) updateChromeUi();
         }
@@ -2958,14 +2917,15 @@ public final class ReBrowserActivity extends Activity {
                 boolean isUserGesture,
                 Message resultMsg
         ) {
-            if (!isUserGesture || activeWorkspace == null) return false;
-            ReBrowserStore.Tab tab = store.addTab(activeWorkspace, "about:blank");
+            if (!isUserGesture || activeWorkspace() == null) return false;
+            ReBrowserStore.Tab tab = workspaceController.addTab(
+                    activeWorkspace(), "about:blank");
             if (tab == null) {
                 toast("每个总标签页最多 50 个子标签页");
                 return false;
             }
             try {
-                WebView popup = createBrowserWebView(activeWorkspace.profileName, tab);
+                WebView popup = createBrowserWebView(activeWorkspace().profileName, tab);
                 tabWebViews.put(tab.id, popup);
                 loadedTabIds.add(tab.id);
                 showTab(tab);
@@ -2975,7 +2935,8 @@ public final class ReBrowserActivity extends Activity {
                 resultMsg.sendToTarget();
                 return true;
             } catch (Throwable error) {
-                activeWorkspace.tabs.remove(tab);
+                workspaceController.discardAddedTab(
+                        activeWorkspace(), tab);
                 showProfileFailure(error);
                 return false;
             }
@@ -3038,8 +2999,8 @@ public final class ReBrowserActivity extends Activity {
             long contentLength
     ) {
         ReBrowserStore.Tab tab = webViewTabs.get(sourceView);
-        if (tab == null || activeWorkspace == null || !activeWorkspace.tabs.contains(tab)
-                || !activeWorkspace.profileName.equals(profileName)
+        if (tab == null || activeWorkspace() == null || !activeWorkspace().tabs.contains(tab)
+                || !activeWorkspace().profileName.equals(profileName)
                 || !ReBrowserStore.isOwnedProfile(profileName)) {
             toast("已拒绝来源不明确的下载");
             return;
@@ -3066,7 +3027,7 @@ public final class ReBrowserActivity extends Activity {
         int rateCount = downloadStore.recordAttempt(siteKey, System.currentTimeMillis());
         boolean highFrequency = rateCount >= 3;
         ReBrowserDownloads.Record record = downloadStore.create(
-                activeWorkspace.id, tab.id, profileName, sourceUrl, origin, url,
+                activeWorkspace().id, tab.id, profileName, sourceUrl, origin, url,
                 userAgent, contentDisposition, mimeType, contentLength,
                 rateCount, highFrequency);
         if (!makeDownloadRecordRoom()) {
@@ -3222,7 +3183,7 @@ public final class ReBrowserActivity extends Activity {
         WebView webView = tabWebViews.get(record.tabId);
         ReBrowserStore.Tab tab = webView == null ? null : webViewTabs.get(webView);
         if (webView == null || tab == null
-                || !record.profileName.equals(activeWorkspace.profileName)
+                || !record.profileName.equals(activeWorkspace().profileName)
                 || !record.sourceOrigin.equals(safeOrigin(webView.getUrl()))) {
             record.status = ReBrowserDownloads.STATUS_EXPIRED;
             record.error = "blob-source-page-unavailable";
