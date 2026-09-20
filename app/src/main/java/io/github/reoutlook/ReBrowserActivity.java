@@ -7,7 +7,6 @@ import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
@@ -25,8 +24,6 @@ import android.util.Base64;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.WindowInsets;
-import android.view.WindowInsetsController;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.DownloadListener;
@@ -124,9 +121,7 @@ public final class ReBrowserActivity extends Activity {
     private boolean childSelectionMode;
     private long lastBackPressAt;
     private ValueCallback<Uri[]> pendingFileChooser;
-    private FrameLayout fullscreenContainer;
-    private WebChromeClient.CustomViewCallback fullscreenCallback;
-    private int systemUiBeforeFullscreen;
+    private ReBrowserFullscreenController fullscreenController;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -134,13 +129,15 @@ public final class ReBrowserActivity extends Activity {
         SystemBackDispatcher.register(this, this::handleSystemBack);
         store = new ReBrowserStore(this);
         browserPreferences = new ReBrowserPreferences(this);
-        applyGlobalOrientationPreference();
+        fullscreenController = new ReBrowserFullscreenController(this, browserPreferences);
+        fullscreenController.applyGlobalOrientationPreference();
         bookmarkStore = new ReBrowserFavorites(this);
         bookmarks.addAll(bookmarkStore.load());
         downloadStore = new ReBrowserDownloads(this);
         downloads.addAll(downloadStore.load());
         refreshDownloadStates();
         root = createRoot();
+        fullscreenController.attachStyledRoot(root);
         setContentView(root);
 
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
@@ -286,10 +283,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private GradientDrawable roundedBackground(int color, int radius) {
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(color);
-        background.setCornerRadius(radius);
-        return background;
+        return ReBrowserUi.roundedBackground(color, radius);
     }
 
     private void updateChromeUi() {
@@ -869,7 +863,9 @@ public final class ReBrowserActivity extends Activity {
             browserPreferences.setForcePrimaryPromotionEnabled((Boolean) value);
         } else if ("globalOrientation".equals(name)) {
             browserPreferences.setGlobalOrientation((String) value);
-            if (fullscreenContainer == null) applyGlobalOrientationPreference();
+            if (!fullscreenController.isFullscreen()) {
+                fullscreenController.applyGlobalOrientationPreference();
+            }
         } else if ("videoOrientationOverride".equals(name)) {
             browserPreferences.setVideoOrientationOverrideEnabled((Boolean) value);
         } else if ("videoOrientation".equals(name)) {
@@ -915,7 +911,7 @@ public final class ReBrowserActivity extends Activity {
         value.put("loadProgress", tab == null ? 0 : tabLoadProgress.getOrDefault(tab.id, 0));
         value.put("lastMainFrameError", tab == null ? ""
                 : tabLastErrors.getOrDefault(tab.id, ""));
-        value.put("fullscreenVideo", fullscreenContainer != null);
+        value.put("fullscreenVideo", fullscreenController.isFullscreen());
         value.put("globalOrientation", browserPreferences.globalOrientation());
         value.put("videoOrientationOverride",
                 browserPreferences.videoOrientationOverrideEnabled());
@@ -1516,8 +1512,7 @@ public final class ReBrowserActivity extends Activity {
                     popup.dismiss();
                     toggleCurrentBookmark();
                 }));
-        boolean landscape = getResources().getConfiguration().orientation
-                == Configuration.ORIENTATION_LANDSCAPE;
+        boolean landscape = fullscreenController.isLandscape();
         ImageButton orientation = menuShortcut(
                 landscape ? R.drawable.ic_rb_orientation_portrait
                         : R.drawable.ic_rb_orientation_landscape,
@@ -1660,111 +1655,14 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void toggleOrientationLock() {
-        boolean landscape = getResources().getConfiguration().orientation
-                == Configuration.ORIENTATION_LANDSCAPE;
-        browserPreferences.setGlobalOrientation(landscape
-                ? ReBrowserPreferences.ORIENTATION_PORTRAIT
-                : ReBrowserPreferences.ORIENTATION_LANDSCAPE);
-        applyGlobalOrientationPreference();
-        toast(landscape ? "已锁定竖屏" : "已锁定横屏；横屏朝向跟随传感器");
+        String mode = fullscreenController.toggleGlobalOrientationLock();
+        toast(ReBrowserPreferences.ORIENTATION_PORTRAIT.equals(mode)
+                ? "已锁定竖屏" : "已锁定横屏；横屏朝向跟随传感器");
     }
 
     private void clearOrientationLock() {
-        browserPreferences.setGlobalOrientation(ReBrowserPreferences.ORIENTATION_UNLOCKED);
-        applyGlobalOrientationPreference();
+        fullscreenController.clearGlobalOrientationLock();
         toast("已取消 ReBrowser 方向锁定");
-    }
-
-    private void applyGlobalOrientationPreference() {
-        String mode = browserPreferences.globalOrientation();
-        if (ReBrowserPreferences.ORIENTATION_LANDSCAPE.equals(mode)) {
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-        } else if (ReBrowserPreferences.ORIENTATION_UNLOCKED.equals(mode)) {
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
-        } else {
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-        }
-    }
-
-    private int effectiveVideoOrientation() {
-        String mode;
-        if (browserPreferences.videoOrientationOverrideEnabled()) {
-            mode = browserPreferences.videoOrientation();
-        } else {
-            mode = ReBrowserPreferences.ORIENTATION_UNLOCKED.equals(
-                    browserPreferences.globalOrientation())
-                    ? ReBrowserPreferences.VIDEO_ORIENTATION_AUTO
-                    : ReBrowserPreferences.ORIENTATION_LANDSCAPE;
-        }
-        if (ReBrowserPreferences.VIDEO_ORIENTATION_AUTO.equals(mode)) {
-            return ActivityInfo.SCREEN_ORIENTATION_SENSOR;
-        }
-        if (ReBrowserPreferences.ORIENTATION_PORTRAIT.equals(mode)) {
-            return ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
-        }
-        return ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
-    }
-
-    private void showFullscreenContent(
-            View customView,
-            WebChromeClient.CustomViewCallback callback
-    ) {
-        if (fullscreenContainer != null) {
-            callback.onCustomViewHidden();
-            return;
-        }
-        systemUiBeforeFullscreen = getWindow().getDecorView().getSystemUiVisibility();
-        fullscreenCallback = callback;
-        fullscreenContainer = new FrameLayout(this);
-        fullscreenContainer.setBackgroundColor(Color.BLACK);
-        if (customView.getParent() instanceof ViewGroup) {
-            ((ViewGroup) customView.getParent()).removeView(customView);
-        }
-        fullscreenContainer.addView(customView, matchMatch());
-        ViewGroup content = findViewById(android.R.id.content);
-        content.addView(fullscreenContainer, new ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        setFullscreenSystemUi(true);
-        setRequestedOrientation(effectiveVideoOrientation());
-    }
-
-    private void hideFullscreenContent() {
-        if (fullscreenContainer == null) return;
-        ViewGroup parent = (ViewGroup) fullscreenContainer.getParent();
-        if (parent != null) parent.removeView(fullscreenContainer);
-        fullscreenContainer.removeAllViews();
-        fullscreenContainer = null;
-        WebChromeClient.CustomViewCallback callback = fullscreenCallback;
-        fullscreenCallback = null;
-        applyGlobalOrientationPreference();
-        setFullscreenSystemUi(false);
-        if (callback != null) callback.onCustomViewHidden();
-    }
-
-    private void setFullscreenSystemUi(boolean fullscreen) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            WindowInsetsController controller = getWindow().getInsetsController();
-            if (controller != null) {
-                if (fullscreen) {
-                    controller.setSystemBarsBehavior(
-                            WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-                    controller.hide(WindowInsets.Type.systemBars());
-                } else {
-                    controller.show(WindowInsets.Type.systemBars());
-                }
-            }
-        } else if (fullscreen) {
-            getWindow().getDecorView().setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
-        } else {
-            getWindow().getDecorView().setSystemUiVisibility(systemUiBeforeFullscreen);
-        }
-        if (!fullscreen && root != null) WindowStyling.apply(this, root);
     }
 
     private void confirmPrimaryLevelChange(ReBrowserStore.Workspace workspace) {
@@ -2775,17 +2673,15 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private FrameLayout.LayoutParams matchMatch() {
-        return new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+        return ReBrowserUi.matchMatch();
     }
 
     private FrameLayout.LayoutParams matchWrap() {
-        return new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        return ReBrowserUi.matchWrap();
     }
 
     private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+        return ReBrowserUi.dp(this, value);
     }
 
     private void toast(String message) {
@@ -2806,10 +2702,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void handleSystemBack() {
-        if (fullscreenContainer != null) {
-            hideFullscreenContent();
-            return;
-        }
+        if (fullscreenController.hideIfVisible()) return;
         if (childOverviewVisible) {
             if (childSelectionMode) exitChildSelection();
             else showWorkspaceOverview();
@@ -2863,14 +2756,13 @@ public final class ReBrowserActivity extends Activity {
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
-        if (root != null) root.requestApplyInsets();
-        if (fullscreenContainer != null) fullscreenContainer.requestLayout();
+        fullscreenController.onConfigurationChanged();
     }
 
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus && fullscreenContainer != null) setFullscreenSystemUi(true);
+        fullscreenController.onWindowFocusChanged(hasFocus);
     }
 
     @Override
@@ -2898,7 +2790,7 @@ public final class ReBrowserActivity extends Activity {
             recordAdminStatus(request, "failed", null, "activity-destroyed-during-load");
         }
         pendingAdminLoads.clear();
-        hideFullscreenContent();
+        fullscreenController.hide();
         saveCurrentTabStates();
         destroyTabWebViews();
         if (pendingFileChooser != null) pendingFileChooser.onReceiveValue(null);
@@ -3033,12 +2925,12 @@ public final class ReBrowserActivity extends Activity {
     private final class WorkspaceChromeClient extends WebChromeClient {
         @Override
         public void onShowCustomView(View view, CustomViewCallback callback) {
-            showFullscreenContent(view, callback);
+            fullscreenController.show(view, callback);
         }
 
         @Override
         public void onHideCustomView() {
-            hideFullscreenContent();
+            fullscreenController.hide();
         }
 
         @Override
