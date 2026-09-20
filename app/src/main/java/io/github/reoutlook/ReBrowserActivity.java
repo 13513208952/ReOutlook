@@ -10,14 +10,12 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
-import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Message;
 import android.os.SystemClock;
 import android.os.StatFs;
 import android.util.Base64;
@@ -26,14 +24,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
-import android.webkit.DownloadListener;
-import android.webkit.ValueCallback;
-import android.webkit.WebChromeClient;
-import android.webkit.WebResourceError;
-import android.webkit.WebResourceRequest;
-import android.webkit.WebSettings;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
@@ -46,14 +36,11 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import androidx.webkit.Profile;
 import androidx.webkit.ProfileStore;
-import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
-import org.json.JSONTokener;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -61,7 +48,6 @@ import java.security.MessageDigest;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -81,9 +67,6 @@ public final class ReBrowserActivity extends Activity {
     private List<ReBrowserStore.Workspace> shelvedSecondaryWorkspaces = List.of();
     private final List<ReBrowserFavorites.Favorite> bookmarks = new ArrayList<>();
     private final List<ReBrowserDownloads.Record> downloads = new ArrayList<>();
-    private final Map<String, WebView> tabWebViews = new HashMap<>();
-    private final Map<WebView, ReBrowserStore.Tab> webViewTabs = new IdentityHashMap<>();
-    private final Set<String> loadedTabIds = new java.util.HashSet<>();
     private final Set<String> selectedWorkspaceIds = new java.util.HashSet<>();
     private final Set<String> selectedChildTabIds = new java.util.HashSet<>();
     private final Map<String, Integer> tabLoadProgress = new HashMap<>();
@@ -97,6 +80,7 @@ public final class ReBrowserActivity extends Activity {
     private ReBrowserPreferences browserPreferences;
     private ReBrowserFavorites bookmarkStore;
     private ReBrowserDownloads downloadStore;
+    private ReBrowserWebController webController;
     private FrameLayout root;
     private FrameLayout webContainer;
     private LinearLayout browserToolbar;
@@ -119,7 +103,6 @@ public final class ReBrowserActivity extends Activity {
     private boolean workspaceSelectionMode;
     private boolean childSelectionMode;
     private long lastBackPressAt;
-    private ValueCallback<Uri[]> pendingFileChooser;
     private ReBrowserFullscreenController fullscreenController;
 
     @Override
@@ -132,12 +115,15 @@ public final class ReBrowserActivity extends Activity {
         browserPreferences = new ReBrowserPreferences(this);
         fullscreenController = new ReBrowserFullscreenController(this, browserPreferences);
         fullscreenController.applyGlobalOrientationPreference();
+        webController = new ReBrowserWebController(this, browserPreferences,
+                fullscreenController, new WebListener(), FILE_CHOOSER_REQUEST);
         bookmarkStore = new ReBrowserFavorites(this);
         bookmarks.addAll(bookmarkStore.load());
         downloadStore = new ReBrowserDownloads(this);
         downloads.addAll(downloadStore.load());
         refreshDownloadStates();
         root = createRoot();
+        webController.attachContainer(webContainer);
         fullscreenController.attachStyledRoot(root);
         setContentView(root);
 
@@ -293,7 +279,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void activateWorkspace(ReBrowserStore.Workspace workspace) {
-        if (workspace == activeWorkspace() && !tabWebViews.isEmpty()) return;
+        if (workspace == activeWorkspace() && webController.hasPages()) return;
         if (activeWorkspace() != null && workspace != activeWorkspace()) {
             for (ReBrowserStore.Tab tab : activeWorkspace().tabs) {
                 JSONObject pending = pendingAdminLoads.remove(tab.id);
@@ -314,83 +300,18 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void showTab(ReBrowserStore.Tab tab) {
-        if (activeWorkspace() == null || !activeWorkspace().tabs.contains(tab)) return;
+        ReBrowserStore.Workspace workspace = activeWorkspace();
+        if (workspace == null || !workspace.tabs.contains(tab)) return;
         saveVisibleTabState();
-        workspaceController.selectTab(activeWorkspace(), tab);
-        WebView webView = tabWebViews.get(tab.id);
-        if (webView == null) {
-            try {
-                webView = createBrowserWebView(activeWorkspace().profileName, tab);
-            } catch (Throwable error) {
-                showProfileFailure(error);
-                return;
-            }
-            tabWebViews.put(tab.id, webView);
+        workspaceController.selectTab(workspace, tab);
+        try {
+            webController.showTab(workspace.id, workspace.profileName, tab);
+        } catch (Throwable error) {
+            showProfileFailure(error);
+            return;
         }
-        View previous = webContainer.getChildCount() == 0 ? null : webContainer.getChildAt(0);
-        if (previous instanceof WebView && previous != webView) ((WebView) previous).onPause();
-        webContainer.removeAllViews();
-        if (webView.getParent() instanceof ViewGroup) {
-            ((ViewGroup) webView.getParent()).removeView(webView);
-        }
-        webContainer.addView(webView, matchMatch());
-        if (loadedTabIds.add(tab.id)) webView.loadUrl(tab.url);
-        webView.onResume();
         saveWorkspaceMetadata();
         updateChromeUi();
-    }
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private WebView createBrowserWebView(String profileName, ReBrowserStore.Tab tab) {
-        if (!ReBrowserStore.isOwnedProfile(profileName)) {
-            throw new IllegalArgumentException("拒绝使用非 ReBrowser Profile");
-        }
-        WebView webView = new WebView(this);
-        try {
-            // Required invariant: no WebView operation may happen before the named Profile is set.
-            WebViewCompat.setProfile(webView, profileName);
-        } catch (Throwable error) {
-            webView.destroy();
-            throw error;
-        }
-        WebSettings settings = webView.getSettings();
-        settings.setJavaScriptEnabled(browserPreferences.javascriptEnabled());
-        settings.setDomStorageEnabled(true);
-        settings.setDatabaseEnabled(true);
-        settings.setSupportMultipleWindows(true);
-        settings.setJavaScriptCanOpenWindowsAutomatically(false);
-        settings.setMediaPlaybackRequiresUserGesture(true);
-        settings.setSupportZoom(true);
-        settings.setBuiltInZoomControls(true);
-        settings.setDisplayZoomControls(false);
-        settings.setAllowFileAccess(false);
-        settings.setAllowContentAccess(true);
-        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
-        settings.setSafeBrowsingEnabled(true);
-        webView.setWebViewClient(new WorkspaceWebViewClient());
-        webView.setWebChromeClient(new WorkspaceChromeClient());
-        webView.setDownloadListener(new WorkspaceDownloadListener(webView, profileName));
-        applyBrowserPreferences(webView);
-        webViewTabs.put(webView, tab);
-        return webView;
-    }
-
-    private void applyBrowserPreferences(WebView webView) {
-        WebSettings settings = webView.getSettings();
-        settings.setJavaScriptEnabled(browserPreferences.javascriptEnabled());
-        settings.setUseWideViewPort(browserPreferences.desktopModeEnabled());
-        settings.setLoadWithOverviewMode(browserPreferences.desktopModeEnabled());
-        settings.setUserAgentString(browserPreferences.desktopModeEnabled()
-                ? desktopUserAgent() : null);
-        WebViewCompat.getProfile(webView).getCookieManager().setAcceptThirdPartyCookies(
-                webView, browserPreferences.thirdPartyCookiesEnabled());
-    }
-
-    private String desktopUserAgent() {
-        String defaultAgent = WebSettings.getDefaultUserAgent(this);
-        return defaultAgent.replaceFirst("\\(Linux; Android[^)]*\\)", "(X11; Linux x86_64)")
-                .replace("; wv", "")
-                .replace(" Mobile", "");
     }
 
     private void navigateActiveTab(String input) {
@@ -398,10 +319,8 @@ public final class ReBrowserActivity extends Activity {
         if (tab == null) return;
         String url = normalizeAddress(input);
         workspaceController.updateTab(tab, url, null);
-        WebView webView = tabWebViews.get(tab.id);
-        if (webView == null) showTab(tab);
-        else webView.loadUrl(url);
-        loadedTabIds.add(tab.id);
+        if (webController.currentUrl(tab.id) == null) showTab(tab);
+        else webController.load(tab.id, url);
         saveWorkspaceMetadata();
         omnibox.setText(url);
     }
@@ -409,8 +328,8 @@ public final class ReBrowserActivity extends Activity {
     private void toggleCurrentBookmark() {
         ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
         if (tab == null) return;
-        WebView webView = activeWebView();
-        String url = webView == null || webView.getUrl() == null ? tab.url : webView.getUrl();
+        String currentUrl = webController.currentUrl(tab.id);
+        String url = currentUrl == null ? tab.url : currentUrl;
         ReBrowserFavorites.Favorite existing = bookmarkStore.findByUrl(bookmarks, url);
         if (existing == null) {
             addCurrentBookmark();
@@ -423,10 +342,10 @@ public final class ReBrowserActivity extends Activity {
     private void addCurrentBookmark() {
         ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
         if (tab == null) return;
-        WebView webView = activeWebView();
-        String url = webView == null || webView.getUrl() == null ? tab.url : webView.getUrl();
-        String title = webView == null || webView.getTitle() == null
-                ? tab.title : webView.getTitle();
+        String currentUrl = webController.currentUrl(tab.id);
+        String currentTitle = webController.currentTitle(tab.id);
+        String url = currentUrl == null ? tab.url : currentUrl;
+        String title = currentTitle == null ? tab.title : currentTitle;
         ReBrowserFavorites.Favorite existing = bookmarkStore.findByUrl(bookmarks, url);
         if (existing != null) {
             toast("当前网页已收藏");
@@ -598,9 +517,8 @@ public final class ReBrowserActivity extends Activity {
         if (ReBrowserAdminProtocol.OP_ASSERT_LOCATION.equals(operation)) {
             ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
             ReBrowserStore.Tab tab = requireAdminTab(workspace, request);
-            WebView webView = tabWebViews.get(tab.id);
-            String actual = webView != null && webView.getUrl() != null
-                    ? webView.getUrl() : tab.url;
+            String currentUrl = webController.currentUrl(tab.id);
+            String actual = currentUrl == null ? tab.url : currentUrl;
             return adminTargetDetails(workspace, tab)
                     .put("matches", samePage(actual, request.getString("url")))
                     .put("origin", safeOrigin(actual));
@@ -739,13 +657,16 @@ public final class ReBrowserActivity extends Activity {
         hideOverview();
         activateWorkspace(workspace);
         showTab(tab);
-        WebView webView = tabWebViews.get(tab.id);
-        if (webView == null) throw new IllegalStateException("webview-unavailable");
-        webView.stopLoading();
-        if (ReBrowserAdminProtocol.OP_GO_BACK.equals(operation) && !webView.canGoBack()) {
+        if (webController.currentUrl(tab.id) == null) {
+            throw new IllegalStateException("webview-unavailable");
+        }
+        webController.stop(tab.id);
+        if (ReBrowserAdminProtocol.OP_GO_BACK.equals(operation)
+                && !webController.canGoBack(tab.id)) {
             throw new IllegalStateException("no-back-history");
         }
-        if (ReBrowserAdminProtocol.OP_GO_FORWARD.equals(operation) && !webView.canGoForward()) {
+        if (ReBrowserAdminProtocol.OP_GO_FORWARD.equals(operation)
+                && !webController.canGoForward(tab.id)) {
             throw new IllegalStateException("no-forward-history");
         }
         if (request.optBoolean("waitForLoad", false)
@@ -755,19 +676,19 @@ public final class ReBrowserActivity extends Activity {
         if (ReBrowserAdminProtocol.OP_OPEN_URL.equals(operation)) {
             navigateActiveTab(request.getString("url"));
         } else if (ReBrowserAdminProtocol.OP_RELOAD.equals(operation)) {
-            webView.stopLoading();
-            webView.reload();
+            webController.stop(tab.id);
+            webController.reload(tab.id);
         } else if (ReBrowserAdminProtocol.OP_STOP.equals(operation)) {
-            webView.stopLoading();
+            webController.stop(tab.id);
             loadingTabIds.remove(tab.id);
             JSONObject pending = pendingAdminLoads.remove(tab.id);
             if (pending != null) {
                 recordAdminStatus(pending, "failed", null, "navigation-stopped");
             }
         } else if (ReBrowserAdminProtocol.OP_GO_BACK.equals(operation)) {
-            webView.goBack();
+            webController.goBack(tab.id);
         } else if (ReBrowserAdminProtocol.OP_GO_FORWARD.equals(operation)) {
-            webView.goForward();
+            webController.goForward(tab.id);
         } else if (ReBrowserAdminProtocol.OP_GO_HOME.equals(operation)) {
             navigateActiveTab(browserPreferences.homeUrl());
         }
@@ -859,7 +780,7 @@ public final class ReBrowserActivity extends Activity {
         } else {
             throw new IllegalArgumentException("unsupported-preference");
         }
-        for (WebView webView : tabWebViews.values()) applyBrowserPreferences(webView);
+        webController.applyPreferencesToAll();
         return new JSONObject().put("name", name).put("updated", true);
     }
 
@@ -884,7 +805,7 @@ public final class ReBrowserActivity extends Activity {
 
     private JSONObject createAdminDiagnostics() throws Exception {
         JSONObject value = new JSONObject();
-        android.content.pm.PackageInfo provider = WebView.getCurrentWebViewPackage();
+        android.content.pm.PackageInfo provider = ReBrowserWebController.currentProvider();
         value.put("webViewPackage", provider == null ? "" : provider.packageName);
         value.put("webViewVersion", provider == null ? "" : provider.versionName);
         value.put("multiProfile",
@@ -1226,19 +1147,9 @@ public final class ReBrowserActivity extends Activity {
                 workspace, tab, browserPreferences.homeUrl());
         if (!result.valid) return;
         if (result.resetOnly) {
-            WebView current = tabWebViews.get(tab.id);
-            if (current != null) current.loadUrl(tab.url);
-            loadedTabIds.add(tab.id);
+            if (webController.currentUrl(tab.id) != null) webController.load(tab.id, tab.url);
         } else {
-            WebView removed = tabWebViews.remove(tab.id);
-            webViewTabs.remove(removed);
-            loadedTabIds.remove(tab.id);
-            if (removed != null) {
-                if (removed.getParent() instanceof ViewGroup) {
-                    ((ViewGroup) removed.getParent()).removeView(removed);
-                }
-                removed.destroy();
-            }
+            webController.removeTab(tab.id);
             if (result.nextActiveTab != null) showTab(result.nextActiveTab);
         }
         updateChromeUi();
@@ -1366,16 +1277,14 @@ public final class ReBrowserActivity extends Activity {
     private void saveVisibleTabState() {
         if (activeWorkspace() == null) return;
         ReBrowserStore.Tab tab = activeWorkspace().activeTab();
-        WebView webView = tab == null ? null : tabWebViews.get(tab.id);
-        if (tab == null || webView == null) return;
-        workspaceController.updateTab(tab, webView.getUrl(), webView.getTitle());
+        if (tab == null) return;
+        workspaceController.updateTab(
+                tab, webController.currentUrl(tab.id), webController.currentTitle(tab.id));
     }
 
     private void saveCurrentTabStates() {
-        for (Map.Entry<WebView, ReBrowserStore.Tab> entry : webViewTabs.entrySet()) {
-            WebView webView = entry.getKey();
-            ReBrowserStore.Tab tab = entry.getValue();
-            workspaceController.updateTab(tab, webView.getUrl(), webView.getTitle());
+        for (ReBrowserWebController.PageState state : webController.pageStates()) {
+            workspaceController.updateTab(state.tab, state.url, state.title);
         }
         saveWorkspaceMetadata();
     }
@@ -1388,15 +1297,7 @@ public final class ReBrowserActivity extends Activity {
         if (activeBlobTransfer != null) {
             failBlobTransfer(activeBlobTransfer, "blob-source-webview-destroyed");
         }
-        webContainer.removeAllViews();
-        for (WebView webView : tabWebViews.values()) {
-            webView.stopLoading();
-            webView.removeAllViews();
-            webView.destroy();
-        }
-        tabWebViews.clear();
-        webViewTabs.clear();
-        loadedTabIds.clear();
+        webController.destroyAll();
     }
 
     private void deletePendingProfiles() {
@@ -1440,10 +1341,9 @@ public final class ReBrowserActivity extends Activity {
 
     private void showBrowserMenu(View anchor) {
         if (activeWorkspace() == null) return;
-        WebView webView = activeWebView();
         ReBrowserStore.Tab tab = activeWorkspace().activeTab();
-        String url = webView == null || webView.getUrl() == null
-                ? tab == null ? "" : tab.url : webView.getUrl();
+        String currentUrl = tab == null ? null : webController.currentUrl(tab.id);
+        String url = currentUrl == null ? tab == null ? "" : tab.url : currentUrl;
         boolean favorite = bookmarkStore.findByUrl(bookmarks, url) != null;
 
         LinearLayout panel = new LinearLayout(this);
@@ -1462,14 +1362,14 @@ public final class ReBrowserActivity extends Activity {
         LinearLayout shortcuts = new LinearLayout(this);
         shortcuts.setGravity(Gravity.CENTER);
         shortcuts.addView(menuShortcut(R.drawable.ic_rb_back, "后退",
-                webView != null && webView.canGoBack(), () -> {
+                tab != null && webController.canGoBack(tab.id), () -> {
                     popup.dismiss();
-                    if (webView != null) webView.goBack();
+                    if (tab != null) webController.goBack(tab.id);
                 }));
         shortcuts.addView(menuShortcut(R.drawable.ic_rb_forward, "前进",
-                webView != null && webView.canGoForward(), () -> {
+                tab != null && webController.canGoForward(tab.id), () -> {
                     popup.dismiss();
-                    if (webView != null) webView.goForward();
+                    if (tab != null) webController.goForward(tab.id);
                 }));
         shortcuts.addView(menuShortcut(
                 favorite ? R.drawable.ic_rb_star_filled : R.drawable.ic_rb_star_outline,
@@ -1495,7 +1395,7 @@ public final class ReBrowserActivity extends Activity {
         });
         shortcuts.addView(orientation);
         shortcuts.addView(menuShortcut(R.drawable.ic_rb_refresh, "刷新",
-                webView != null, () -> {
+                tab != null && webController.currentUrl(tab.id) != null, () -> {
                     popup.dismiss();
                     reloadActivePage();
                 }));
@@ -1608,14 +1508,14 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void reloadActivePage() {
-        WebView webView = activeWebView();
-        if (webView == null) return;
+        ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
+        if (tab == null || webController.currentUrl(tab.id) == null) return;
         progressBar.setProgress(5);
         progressBar.setVisibility(View.VISIBLE);
-        webView.post(() -> {
-            if (webView != activeWebView()) return;
-            webView.stopLoading();
-            webView.reload();
+        root.post(() -> {
+            if (activeWorkspace() == null || activeWorkspace().activeTab() != tab) return;
+            webController.stop(tab.id);
+            webController.reload(tab.id);
         });
     }
 
@@ -2616,11 +2516,6 @@ public final class ReBrowserActivity extends Activity {
         return workspaceController.activeWorkspace();
     }
 
-    private WebView activeWebView() {
-        ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
-        return tab == null ? null : tabWebViews.get(tab.id);
-    }
-
     private static String displayUrl(String value) {
         if (value == null || value.isBlank()) return "about:blank";
         Uri uri = Uri.parse(value);
@@ -2694,15 +2589,15 @@ public final class ReBrowserActivity extends Activity {
             return;
         }
         ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
-        WebView webView = tab == null ? null : tabWebViews.get(tab.id);
-        boolean atHomepage = webView != null
-                && samePage(webView.getUrl(), browserPreferences.homeUrl());
-        if (!atHomepage && webView != null && webView.canGoBack()) {
+        String currentUrl = tab == null ? null : webController.currentUrl(tab.id);
+        boolean atHomepage = currentUrl != null
+                && samePage(currentUrl, browserPreferences.homeUrl());
+        if (!atHomepage && tab != null && webController.canGoBack(tab.id)) {
             lastBackPressAt = 0;
-            webView.goBack();
+            webController.goBack(tab.id);
             return;
         }
-        if (!atHomepage && webView != null) {
+        if (!atHomepage && currentUrl != null) {
             lastBackPressAt = 0;
             navigateActiveTab(browserPreferences.homeUrl());
             return;
@@ -2736,19 +2631,15 @@ public final class ReBrowserActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        for (WebView webView : tabWebViews.values()) applyBrowserPreferences(webView);
+        webController.onResume();
         refreshDownloadStates();
         if (downloadOverviewVisible) showDownloadOverview();
-        if (webContainer.getChildCount() > 0
-                && webContainer.getChildAt(0) instanceof WebView) {
-            ((WebView) webContainer.getChildAt(0)).onResume();
-        }
     }
 
     @Override
     protected void onPause() {
         saveCurrentTabStates();
-        for (WebView webView : tabWebViews.values()) webView.onPause();
+        webController.onPause();
         super.onPause();
     }
 
@@ -2761,8 +2652,7 @@ public final class ReBrowserActivity extends Activity {
         fullscreenController.hide();
         saveCurrentTabStates();
         destroyTabWebViews();
-        if (pendingFileChooser != null) pendingFileChooser.onReceiveValue(null);
-        pendingFileChooser = null;
+        webController.cancelPendingFileChooser();
         for (ReBrowserStore.Workspace workspace : workspaces) {
             if (workspace.level == ReBrowserStore.Level.TEMPORARY) {
                 deleteProfileIfPossible(workspace.profileName);
@@ -2774,10 +2664,7 @@ public final class ReBrowserActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != FILE_CHOOSER_REQUEST || pendingFileChooser == null) return;
-        Uri[] result = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
-        pendingFileChooser.onReceiveValue(result);
-        pendingFileChooser = null;
+        webController.onActivityResult(requestCode, resultCode, data);
     }
 
     private void confirmExternalNavigation(Uri uri, String scheme) {
@@ -2802,25 +2689,22 @@ public final class ReBrowserActivity extends Activity {
                 .show();
     }
 
-    private final class WorkspaceWebViewClient extends WebViewClient {
+    private final class WebListener implements ReBrowserWebController.Listener {
         @Override
-        public void onPageStarted(WebView view, String url, Bitmap favicon) {
-            ReBrowserStore.Tab tab = webViewTabs.get(view);
-            if (tab != null) {
-                workspaceController.updateTab(tab, url, null);
-                JSONObject pending = pendingAdminLoads.get(tab.id);
-                if (pending != null) {
-                    try {
-                        pending.put("_loadStarted", true);
-                    } catch (Exception ignored) {
-                        // Boolean insertion into a JSONObject cannot fail in normal operation.
-                    }
+        public void onPageStarted(ReBrowserStore.Tab tab, String url, boolean visible) {
+            workspaceController.updateTab(tab, url, null);
+            JSONObject pending = pendingAdminLoads.get(tab.id);
+            if (pending != null) {
+                try {
+                    pending.put("_loadStarted", true);
+                } catch (Exception ignored) {
+                    // Boolean insertion into a JSONObject cannot fail in normal operation.
                 }
-                loadingTabIds.add(tab.id);
-                tabLoadProgress.put(tab.id, 5);
-                tabLastErrors.remove(tab.id);
             }
-            if (isVisibleWebView(view)) {
+            loadingTabIds.add(tab.id);
+            tabLoadProgress.put(tab.id, 5);
+            tabLastErrors.remove(tab.id);
+            if (visible) {
                 omnibox.setText(ReBrowserStore.safeUrl(url));
                 progressBar.setVisibility(View.VISIBLE);
                 progressBar.setProgress(5);
@@ -2828,16 +2712,18 @@ public final class ReBrowserActivity extends Activity {
         }
 
         @Override
-        public void onPageFinished(WebView view, String url) {
-            ReBrowserStore.Tab tab = webViewTabs.get(view);
-            if (tab != null) {
-                workspaceController.updatePageMetadata(tab, url, view.getTitle());
-                loadingTabIds.remove(tab.id);
-                tabLoadProgress.put(tab.id, 100);
-                saveWorkspaceMetadata();
-                updateChromeUi();
-            }
-            if (isVisibleWebView(view)) {
+        public void onPageFinished(
+                ReBrowserStore.Tab tab,
+                String url,
+                String title,
+                boolean visible
+        ) {
+            workspaceController.updatePageMetadata(tab, url, title);
+            loadingTabIds.remove(tab.id);
+            tabLoadProgress.put(tab.id, 100);
+            saveWorkspaceMetadata();
+            updateChromeUi();
+            if (visible) {
                 omnibox.setText(ReBrowserStore.safeUrl(url));
                 progressBar.setVisibility(View.GONE);
             }
@@ -2845,191 +2731,141 @@ public final class ReBrowserActivity extends Activity {
         }
 
         @Override
-        public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-            Uri uri = request.getUrl();
-            String scheme = uri.getScheme() == null ? "" : request.getUrl().getScheme()
-                    .toLowerCase(java.util.Locale.ROOT);
-            if ("http".equals(scheme) || "https".equals(scheme)) return false;
-            if (!request.isForMainFrame() || !request.hasGesture()) {
-                toast("已阻止网页自动唤起外部应用");
-                return true;
-            }
-            if (!("mailto".equals(scheme) || "tel".equals(scheme)
-                    || "sms".equals(scheme) || "geo".equals(scheme))) {
-                toast("已阻止不受支持的外部链接协议");
-                return true;
-            }
-            confirmExternalNavigation(uri, scheme);
-            return true;
-        }
-
-        @Override
-        public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-            if (!request.isForMainFrame()) return;
-            ReBrowserStore.Tab tab = webViewTabs.get(view);
-            String description = error.getErrorCode() + ":" + error.getDescription();
-            if (tab != null) {
-                loadingTabIds.remove(tab.id);
-                tabLastErrors.put(tab.id, description.substring(0,
-                        Math.min(description.length(), 200)));
-            }
-            if (isVisibleWebView(view)) {
+        public void onMainFrameError(
+                ReBrowserStore.Tab tab,
+                int errorCode,
+                String description,
+                boolean visible
+        ) {
+            loadingTabIds.remove(tab.id);
+            String detail = errorCode + ":" + description;
+            tabLastErrors.put(tab.id, detail.substring(0, Math.min(detail.length(), 200)));
+            if (visible) {
                 progressBar.setVisibility(View.GONE);
                 toast("页面连接失败");
             }
-            finishAdminLoad(tab, false, "page-load-error:" + error.getErrorCode());
-        }
-    }
-
-    private final class WorkspaceChromeClient extends WebChromeClient {
-        @Override
-        public void onShowCustomView(View view, CustomViewCallback callback) {
-            fullscreenController.show(view, callback);
+            finishAdminLoad(tab, false, "page-load-error:" + errorCode);
         }
 
         @Override
-        public void onHideCustomView() {
-            fullscreenController.hide();
+        public void onProgressChanged(
+                ReBrowserStore.Tab tab,
+                int progress,
+                boolean visible
+        ) {
+            tabLoadProgress.put(tab.id, progress);
+            if (!visible) return;
+            progressBar.setProgress(progress);
+            progressBar.setVisibility(progress >= 100 ? View.GONE : View.VISIBLE);
         }
 
         @Override
-        public void onProgressChanged(WebView view, int newProgress) {
-            ReBrowserStore.Tab tab = webViewTabs.get(view);
-            if (tab != null) tabLoadProgress.put(tab.id, newProgress);
-            if (!isVisibleWebView(view)) return;
-            progressBar.setProgress(newProgress);
-            progressBar.setVisibility(newProgress >= 100 ? View.GONE : View.VISIBLE);
-        }
-
-        @Override
-        public void onReceivedTitle(WebView view, String title) {
-            ReBrowserStore.Tab tab = webViewTabs.get(view);
-            if (tab == null || title == null || title.isBlank()) return;
+        public void onTitleReceived(
+                ReBrowserStore.Tab tab,
+                String title,
+                boolean visible
+        ) {
+            if (title == null || title.isBlank()) return;
             workspaceController.updateTab(tab, null, title);
             saveWorkspaceMetadata();
-            if (isVisibleWebView(view)) updateChromeUi();
+            if (visible) updateChromeUi();
         }
 
         @Override
-        public boolean onCreateWindow(
-                WebView view,
-                boolean isDialog,
-                boolean isUserGesture,
-                Message resultMsg
+        public void onExternalNavigationBlocked(String message) {
+            toast(message);
+        }
+
+        @Override
+        public void onExternalNavigationRequested(Uri uri, String scheme) {
+            confirmExternalNavigation(uri, scheme);
+        }
+
+        @Override
+        public ReBrowserWebController.PopupTarget onCreatePopup(
+                ReBrowserStore.Tab sourceTab
         ) {
-            if (!isUserGesture || activeWorkspace() == null) return false;
-            ReBrowserStore.Tab tab = workspaceController.addTab(
-                    activeWorkspace(), "about:blank");
+            ReBrowserStore.Workspace workspace = activeWorkspace();
+            if (workspace == null || !workspace.tabs.contains(sourceTab)) return null;
+            ReBrowserStore.Tab tab = workspaceController.addTab(workspace, "about:blank");
             if (tab == null) {
                 toast("每个总标签页最多 50 个子标签页");
-                return false;
+                return null;
             }
-            try {
-                WebView popup = createBrowserWebView(activeWorkspace().profileName, tab);
-                tabWebViews.put(tab.id, popup);
-                loadedTabIds.add(tab.id);
-                showTab(tab);
-                WebView.WebViewTransport transport =
-                        (WebView.WebViewTransport) resultMsg.obj;
-                transport.setWebView(popup);
-                resultMsg.sendToTarget();
-                return true;
-            } catch (Throwable error) {
-                workspaceController.discardAddedTab(
-                        activeWorkspace(), tab);
-                showProfileFailure(error);
-                return false;
-            }
+            return new ReBrowserWebController.PopupTarget(
+                    workspace.id, workspace.profileName, tab);
         }
 
         @Override
-        public void onCloseWindow(WebView window) {
-            ReBrowserStore.Tab tab = webViewTabs.get(window);
-            if (tab != null) closeTab(tab);
+        public void onPopupCreated(ReBrowserStore.Tab tab) {
+            workspaceController.selectTab(activeWorkspace(), tab);
+            saveWorkspaceMetadata();
+            updateChromeUi();
         }
 
         @Override
-        public boolean onShowFileChooser(
-                WebView webView,
-                ValueCallback<Uri[]> filePathCallback,
-                FileChooserParams fileChooserParams
-        ) {
-            if (pendingFileChooser != null) pendingFileChooser.onReceiveValue(null);
-            pendingFileChooser = filePathCallback;
-            try {
-                startActivityForResult(fileChooserParams.createIntent(), FILE_CHOOSER_REQUEST);
-                return true;
-            } catch (ActivityNotFoundException error) {
-                pendingFileChooser = null;
-                toast("没有可用的文件选择器");
-                return false;
-            }
+        public void onPopupCreationFailed(ReBrowserStore.Tab tab, Throwable error) {
+            workspaceController.discardAddedTab(activeWorkspace(), tab);
+            showProfileFailure(error);
+        }
+
+        @Override
+        public void onCloseRequested(ReBrowserStore.Tab tab) {
+            closeTab(tab);
+        }
+
+        @Override
+        public void onDownloadRequested(ReBrowserWebController.DownloadRequest request) {
+            requestDownload(request);
+        }
+
+        @Override
+        public void onFileChooserUnavailable() {
+            toast("没有可用的文件选择器");
         }
     }
 
-    private final class WorkspaceDownloadListener implements DownloadListener {
-        private final WebView sourceView;
-        private final String profileName;
-
-        WorkspaceDownloadListener(WebView sourceView, String profileName) {
-            this.sourceView = sourceView;
-            this.profileName = profileName;
+    private void requestDownload(ReBrowserWebController.DownloadRequest request) {
+        ReBrowserStore.Workspace workspace = activeWorkspace();
+        ReBrowserStore.Tab tab = null;
+        if (workspace != null) {
+            for (ReBrowserStore.Tab candidate : workspace.tabs) {
+                if (candidate.id.equals(request.tabId)) {
+                    tab = candidate;
+                    break;
+                }
+            }
         }
-
-        @Override
-        public void onDownloadStart(
-                String url,
-                String userAgent,
-                String contentDisposition,
-                String mimeType,
-                long contentLength
-        ) {
-            requestDownload(sourceView, profileName, url, userAgent,
-                    contentDisposition, mimeType, contentLength);
-        }
-    }
-
-    private void requestDownload(
-            WebView sourceView,
-            String profileName,
-            String url,
-            String userAgent,
-            String contentDisposition,
-            String mimeType,
-            long contentLength
-    ) {
-        ReBrowserStore.Tab tab = webViewTabs.get(sourceView);
-        if (tab == null || activeWorkspace() == null || !activeWorkspace().tabs.contains(tab)
-                || !activeWorkspace().profileName.equals(profileName)
-                || !ReBrowserStore.isOwnedProfile(profileName)) {
+        if (workspace == null || tab == null || !workspace.id.equals(request.workspaceId)
+                || !workspace.profileName.equals(request.profileName)
+                || !ReBrowserStore.isOwnedProfile(request.profileName)) {
             toast("已拒绝来源不明确的下载");
             return;
         }
-        String sourceUrl = sourceView.getUrl() == null ? tab.url : sourceView.getUrl();
-        String origin = safeOrigin(sourceUrl);
-        if (origin.isBlank()) {
+        if (request.sourceOrigin.isBlank()) {
             toast("已拒绝没有顶层网站来源的下载");
             return;
         }
-        String kind = ReBrowserDownloads.kind(url);
+        String kind = ReBrowserDownloads.kind(request.url);
         if (ReBrowserDownloads.KIND_HTTP.equals(kind)) {
-            String scheme = Uri.parse(url).getScheme();
+            String scheme = Uri.parse(request.url).getScheme();
             if (!("https".equalsIgnoreCase(scheme) || "http".equalsIgnoreCase(scheme))) {
                 toast("仅允许 HTTP(S)、Blob 或 Data 下载");
                 return;
             }
         } else if (ReBrowserDownloads.KIND_BLOB.equals(kind)
-                && !url.startsWith("blob:" + origin + "/")) {
+                && !request.url.startsWith("blob:" + request.sourceOrigin + "/")) {
             toast("Blob 下载来源与当前顶层网站不一致");
             return;
         }
-        String siteKey = profileName + "|" + origin;
+        String siteKey = request.profileName + "|" + request.sourceOrigin;
         int rateCount = downloadStore.recordAttempt(siteKey, System.currentTimeMillis());
         boolean highFrequency = rateCount >= 3;
         ReBrowserDownloads.Record record = downloadStore.create(
-                activeWorkspace().id, tab.id, profileName, sourceUrl, origin, url,
-                userAgent, contentDisposition, mimeType, contentLength,
-                rateCount, highFrequency);
+                request.workspaceId, request.tabId, request.profileName,
+                request.sourceUrl, request.sourceOrigin, request.url,
+                request.userAgent, request.contentDisposition,
+                request.mimeType, request.contentLength, rateCount, highFrequency);
         if (!makeDownloadRecordRoom()) {
             toast("下载记录与活动任务已达到上限");
             return;
@@ -3154,9 +2990,8 @@ public final class ReBrowserActivity extends Activity {
             if (!ReBrowserStore.isOwnedProfile(record.profileName)) {
                 throw new SecurityException("non-ReBrowser-profile");
             }
-            Profile profile = ProfileStore.getInstance().getProfile(record.profileName);
-            if (profile == null) throw new IllegalStateException("profile-unavailable");
-            String cookie = profile.getCookieManager().getCookie(record.url);
+            String cookie = webController.cookieForHttpDownload(
+                    record.tabId, record.profileName, record.sourceOrigin, record.url);
             String referer = record.sourceOrigin.equals(safeOrigin(record.url))
                     ? record.sourceUrl : record.sourceOrigin + "/";
             downloadStore.enqueueHttp(record, cookie, referer);
@@ -3180,64 +3015,61 @@ public final class ReBrowserActivity extends Activity {
             toast("一次只能提取一个 Blob 文件");
             return;
         }
-        WebView webView = tabWebViews.get(record.tabId);
-        ReBrowserStore.Tab tab = webView == null ? null : webViewTabs.get(webView);
-        if (webView == null || tab == null
-                || !record.profileName.equals(activeWorkspace().profileName)
-                || !record.sourceOrigin.equals(safeOrigin(webView.getUrl()))) {
-            record.status = ReBrowserDownloads.STATUS_EXPIRED;
-            record.error = "blob-source-page-unavailable";
-            downloadStore.save(downloads);
-            toast("Blob 所属页面已离开，请在原网页重新发起下载");
-            return;
-        }
-        if (!webView.getSettings().getJavaScriptEnabled()) {
-            record.status = ReBrowserDownloads.STATUS_FAILED;
-            record.error = "javascript-disabled";
-            downloadStore.save(downloads);
-            toast("Blob 提取需要当前网页启用 JavaScript");
-            return;
-        }
+        BlobTransfer transfer = null;
         try {
             File directory = new File(getCacheDir(), "rebrowser-downloads");
             if (!directory.exists() && !directory.mkdirs()) {
                 throw new IllegalStateException("temporary-directory-unavailable");
             }
-            BlobTransfer transfer = new BlobTransfer(record, webView,
-                    new File(directory, record.id + ".part"));
+            transfer = new BlobTransfer(
+                    record, new File(directory, record.id + ".part"));
             activeBlobTransfer = transfer;
             customDownloadIds.add(record.id);
             record.status = ReBrowserDownloads.STATUS_DOWNLOADING;
             record.updatedAt = System.currentTimeMillis();
             downloadStore.save(downloads);
-            String key = JSONObject.quote(transfer.key);
-            String script = "(()=>{const s={status:'loading',blob:null,error:''};window["
-                    + key + "]=s;fetch(" + JSONObject.quote(record.url)
-                    + ").then(r=>r.blob()).then(b=>{s.blob=b;s.size=b.size;s.type=b.type||'';"
-                    + "s.status='ready';}).catch(e=>{s.error=String(e).slice(0,160);"
-                    + "s.status='error';});return true;})()";
             transfer.phaseDeadline = SystemClock.elapsedRealtime() + 30_000L;
-            webView.evaluateJavascript(script, ignored -> pollBlobMetadata(transfer));
+            BlobTransfer startedTransfer = transfer;
+            transfer.handle = webController.beginBlobTransfer(
+                    record.tabId, record.profileName, record.sourceOrigin,
+                    record.url, record.id, started -> {
+                        if (startedTransfer != activeBlobTransfer) return;
+                        if (!Boolean.TRUE.equals(started)) {
+                            failBlobTransfer(startedTransfer, "blob-initialization-failed");
+                        } else {
+                            pollBlobMetadata(startedTransfer);
+                        }
+                    });
         } catch (Exception error) {
-            failBlobTransfer(activeBlobTransfer, "blob-initialization-failed");
+            if (transfer != null || activeBlobTransfer != null) {
+                failBlobTransfer(transfer == null ? activeBlobTransfer : transfer,
+                        "blob-initialization-failed:" + error.getMessage());
+            } else {
+                record.status = ReBrowserDownloads.STATUS_FAILED;
+                record.error = "blob-initialization-failed:" + error.getMessage();
+                record.updatedAt = System.currentTimeMillis();
+                downloadStore.save(downloads);
+            }
         }
     }
 
     private void pollBlobMetadata(BlobTransfer transfer) {
         if (transfer != activeBlobTransfer) return;
-        String key = JSONObject.quote(transfer.key);
-        String script = "(()=>{const s=window[" + key + "];if(!s)return JSON.stringify("
-                + "{status:'error',error:'missing-blob-state'});return JSON.stringify("
-                + "{status:s.status,error:s.error||'',size:s.size||0,type:s.type||''});})()";
-        transfer.webView.evaluateJavascript(script,
-                result -> handleBlobMetadataPoll(transfer, result));
+        try {
+            webController.pollBlobMetadata(transfer.handle,
+                    metadata -> handleBlobMetadataPoll(transfer, metadata));
+        } catch (Exception error) {
+            failBlobTransfer(transfer, "blob-metadata-invalid:" + error.getMessage());
+        }
     }
 
-    private void handleBlobMetadataPoll(BlobTransfer transfer, String result) {
+    private void handleBlobMetadataPoll(
+            BlobTransfer transfer,
+            ReBrowserWebController.BlobMetadata metadata
+    ) {
         if (transfer != activeBlobTransfer) return;
         try {
-            JSONObject metadata = new JSONObject(decodeJavascriptResult(result));
-            String status = metadata.optString("status");
+            String status = metadata.status;
             if ("loading".equals(status)) {
                 if (SystemClock.elapsedRealtime() >= transfer.phaseDeadline) {
                     throw new IllegalStateException("blob-fetch-timeout");
@@ -3246,9 +3078,10 @@ public final class ReBrowserActivity extends Activity {
                 return;
             }
             if (!"ready".equals(status)) {
-                throw new IllegalStateException(metadata.optString("error", "blob-fetch-failed"));
+                throw new IllegalStateException(metadata.error.isBlank()
+                        ? "blob-fetch-failed" : metadata.error);
             }
-            long size = metadata.getLong("size");
+            long size = metadata.size;
             if (size < 0 || size > ReBrowserDownloads.MAX_BLOB_BYTES) {
                 throw new IllegalArgumentException("blob-size-limit");
             }
@@ -3257,7 +3090,7 @@ public final class ReBrowserActivity extends Activity {
             }
             transfer.expectedSize = size;
             transfer.record.totalSize = size;
-            String type = metadata.optString("type", "");
+            String type = metadata.type;
             if (!type.isBlank()) transfer.record.mimeType = type;
             transfer.record.dangerous = ReBrowserDownloads.isDangerous(
                     transfer.record.fileName, transfer.record.mimeType);
@@ -3273,37 +3106,40 @@ public final class ReBrowserActivity extends Activity {
             finishBlobTransfer(transfer);
             return;
         }
-        if (!transfer.record.sourceOrigin.equals(safeOrigin(transfer.webView.getUrl()))) {
-            failBlobTransfer(transfer, "blob-source-page-changed");
-            return;
-        }
         long end = Math.min(transfer.expectedSize, transfer.offset + 128 * 1024L);
-        String key = JSONObject.quote(transfer.key);
-        String script = "(()=>{const s=window[" + key + "];if(!s||!s.blob)return false;"
-                + "s.chunkStatus='loading';s.chunk='';s.chunkError='';s.blob.slice("
-                + transfer.offset + "," + end + ").arrayBuffer().then(v=>{const a=new Uint8Array(v);"
-                + "let x='';for(let i=0;i<a.length;i+=32768)x+=String.fromCharCode.apply("
-                + "null,a.subarray(i,i+32768));s.chunk=btoa(x);s.chunkStatus='ready';})"
-                + ".catch(e=>{s.chunkError=String(e).slice(0,160);s.chunkStatus='error';});"
-                + "return true;})()";
         transfer.phaseDeadline = SystemClock.elapsedRealtime() + 30_000L;
-        transfer.webView.evaluateJavascript(script, ignored -> pollBlobChunk(transfer));
+        try {
+            webController.requestBlobChunk(
+                    transfer.handle, transfer.offset, end, started -> {
+                        if (transfer != activeBlobTransfer) return;
+                        if (!Boolean.TRUE.equals(started)) {
+                            failBlobTransfer(transfer, "blob-chunk-start-failed");
+                        } else {
+                            pollBlobChunk(transfer);
+                        }
+                    });
+        } catch (Exception error) {
+            failBlobTransfer(transfer, "blob-source-page-changed:" + error.getMessage());
+        }
     }
 
     private void pollBlobChunk(BlobTransfer transfer) {
         if (transfer != activeBlobTransfer) return;
-        String key = JSONObject.quote(transfer.key);
-        String script = "(()=>{const s=window[" + key + "];if(!s)return JSON.stringify("
-                + "{status:'error',error:'missing-blob-state'});return JSON.stringify("
-                + "{status:s.chunkStatus||'loading',error:s.chunkError||'',data:s.chunk||''});})()";
-        transfer.webView.evaluateJavascript(script, result -> handleBlobChunkPoll(transfer, result));
+        try {
+            webController.pollBlobChunk(transfer.handle,
+                    chunk -> handleBlobChunkPoll(transfer, chunk));
+        } catch (Exception error) {
+            failBlobTransfer(transfer, "blob-chunk-failed:" + error.getMessage());
+        }
     }
 
-    private void handleBlobChunkPoll(BlobTransfer transfer, String result) {
+    private void handleBlobChunkPoll(
+            BlobTransfer transfer,
+            ReBrowserWebController.BlobChunk chunkResult
+    ) {
         if (transfer != activeBlobTransfer) return;
         try {
-            JSONObject chunkResult = new JSONObject(decodeJavascriptResult(result));
-            String status = chunkResult.optString("status");
+            String status = chunkResult.status;
             if ("loading".equals(status)) {
                 if (SystemClock.elapsedRealtime() >= transfer.phaseDeadline) {
                     throw new IllegalStateException("blob-chunk-timeout");
@@ -3312,10 +3148,10 @@ public final class ReBrowserActivity extends Activity {
                 return;
             }
             if (!"ready".equals(status)) {
-                throw new IllegalStateException(chunkResult.optString(
-                        "error", "blob-chunk-failed"));
+                throw new IllegalStateException(chunkResult.error.isBlank()
+                        ? "blob-chunk-failed" : chunkResult.error);
             }
-            String encoded = chunkResult.optString("data");
+            String encoded = chunkResult.data;
             if (encoded.isBlank()) throw new IllegalStateException("empty-blob-chunk");
             byte[] chunk = Base64.decode(encoded, Base64.DEFAULT);
             long remaining = transfer.expectedSize - transfer.offset;
@@ -3381,19 +3217,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void cleanupBlobJavascript(BlobTransfer transfer) {
-        try {
-            transfer.webView.evaluateJavascript(
-                    "(()=>{try{delete window[" + JSONObject.quote(transfer.key)
-                            + "];return true;}catch(e){return false;}})()", null);
-        } catch (RuntimeException ignored) {
-            // The source WebView may already have been destroyed.
-        }
-    }
-
-    private static String decodeJavascriptResult(String result) throws Exception {
-        Object decoded = new JSONTokener(result == null ? "null" : result).nextValue();
-        if (!(decoded instanceof String)) throw new IllegalStateException("javascript-no-result");
-        return (String) decoded;
+        if (transfer.handle != null) webController.endBlobTransfer(transfer.handle);
     }
 
     private static String hexDigest(byte[] value) {
@@ -3475,20 +3299,16 @@ public final class ReBrowserActivity extends Activity {
 
     private static final class BlobTransfer {
         final ReBrowserDownloads.Record record;
-        final WebView webView;
-        final String key;
         final File temporary;
+        ReBrowserWebController.BlobHandle handle;
         FileOutputStream output;
         MessageDigest digest;
         long expectedSize;
         long offset;
         long phaseDeadline;
 
-        BlobTransfer(ReBrowserDownloads.Record record, WebView webView, File temporary)
-                throws Exception {
+        BlobTransfer(ReBrowserDownloads.Record record, File temporary) throws Exception {
             this.record = record;
-            this.webView = webView;
-            this.key = "__rebrowser_download_" + record.id;
             this.temporary = temporary;
             output = new FileOutputStream(temporary);
             digest = MessageDigest.getInstance("SHA-256");
@@ -3522,9 +3342,5 @@ public final class ReBrowserActivity extends Activity {
             downloadStore.save(downloads);
             toast("没有存储权限，无法下载");
         }
-    }
-
-    private boolean isVisibleWebView(WebView webView) {
-        return webView != null && webView.getParent() == webContainer;
     }
 }
