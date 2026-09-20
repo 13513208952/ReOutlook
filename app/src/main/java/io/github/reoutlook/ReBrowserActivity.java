@@ -14,11 +14,8 @@ import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
-import android.os.StatFs;
-import android.util.Base64;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -42,10 +39,6 @@ import androidx.webkit.WebViewFeature;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.security.MessageDigest;
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -59,27 +52,23 @@ public final class ReBrowserActivity extends Activity {
     static final String EXTRA_ADMIN_REQUEST = "adminRequest";
     private static final int FILE_CHOOSER_REQUEST = 5102;
     private static final int DOWNLOAD_STORAGE_REQUEST = 5103;
-    private static final int MAX_PENDING_DOWNLOADS = 32;
-    private static final int MAX_PENDING_DOWNLOADS_PER_SITE = 8;
     private static final long DOUBLE_BACK_INTERVAL_MS = 2_000L;
 
     private List<ReBrowserStore.Workspace> workspaces = List.of();
     private List<ReBrowserStore.Workspace> shelvedSecondaryWorkspaces = List.of();
     private final List<ReBrowserFavorites.Favorite> bookmarks = new ArrayList<>();
-    private final List<ReBrowserDownloads.Record> downloads = new ArrayList<>();
+    private List<ReBrowserDownloads.Record> downloads = List.of();
     private final Set<String> selectedWorkspaceIds = new java.util.HashSet<>();
     private final Set<String> selectedChildTabIds = new java.util.HashSet<>();
     private final Map<String, Integer> tabLoadProgress = new HashMap<>();
     private final Map<String, String> tabLastErrors = new HashMap<>();
     private final Set<String> loadingTabIds = new java.util.HashSet<>();
-    private final Set<String> hashingDownloadIds = new java.util.HashSet<>();
-    private final Set<String> customDownloadIds = new java.util.HashSet<>();
     private final Map<String, JSONObject> pendingAdminLoads = new HashMap<>();
 
     private ReBrowserWorkspaceController workspaceController;
     private ReBrowserPreferences browserPreferences;
     private ReBrowserFavorites bookmarkStore;
-    private ReBrowserDownloads downloadStore;
+    private ReBrowserDownloadController downloadController;
     private ReBrowserWebController webController;
     private FrameLayout root;
     private FrameLayout webContainer;
@@ -93,11 +82,9 @@ public final class ReBrowserActivity extends Activity {
     private boolean bookmarkOverviewVisible;
     private boolean workspaceBookmarkOverviewVisible;
     private boolean downloadOverviewVisible;
-    private String awaitingStorageDownloadId;
-    private BlobTransfer activeBlobTransfer;
     private final Runnable downloadRefreshRunnable = () -> {
         if (!downloadOverviewVisible || root == null) return;
-        refreshDownloadStates();
+        downloadController.refresh();
         showDownloadOverview();
     };
     private boolean workspaceSelectionMode;
@@ -119,13 +106,13 @@ public final class ReBrowserActivity extends Activity {
                 fullscreenController, new WebListener(), FILE_CHOOSER_REQUEST);
         bookmarkStore = new ReBrowserFavorites(this);
         bookmarks.addAll(bookmarkStore.load());
-        downloadStore = new ReBrowserDownloads(this);
-        downloads.addAll(downloadStore.load());
-        refreshDownloadStates();
         root = createRoot();
         webController.attachContainer(webContainer);
         fullscreenController.attachStyledRoot(root);
         setContentView(root);
+        downloadController = new ReBrowserDownloadController(
+                this, webController, new DownloadListener());
+        downloads = downloadController.records();
 
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
             showUnsupportedProvider();
@@ -598,12 +585,12 @@ public final class ReBrowserActivity extends Activity {
         }
         if (ReBrowserAdminProtocol.OP_APPROVE_DOWNLOAD.equals(operation)) {
             ReBrowserDownloads.Record record = requireAdminDownload(request);
-            approveDownload(record);
+            downloadController.approve(record);
             return adminDownloadDetails(record);
         }
         if (ReBrowserAdminProtocol.OP_REJECT_DOWNLOAD.equals(operation)) {
             ReBrowserDownloads.Record record = requireAdminDownload(request);
-            rejectDownload(record);
+            downloadController.reject(record);
             return adminDownloadDetails(record);
         }
         if (ReBrowserAdminProtocol.OP_CANCEL_DOWNLOAD.equals(operation)) {
@@ -611,30 +598,21 @@ public final class ReBrowserActivity extends Activity {
             if (!ReBrowserDownloads.STATUS_DOWNLOADING.equals(record.status)) {
                 throw new IllegalStateException("download-not-running");
             }
-            cancelDownload(record);
+            downloadController.cancel(record);
             return adminDownloadDetails(record);
         }
         if (ReBrowserAdminProtocol.OP_RETRY_DOWNLOAD.equals(operation)) {
             ReBrowserDownloads.Record record = requireAdminDownload(request);
-            retryDownload(record);
+            downloadController.retry(record);
             return adminDownloadDetails(record);
         }
         if (ReBrowserAdminProtocol.OP_DELETE_DOWNLOAD.equals(operation)) {
             ReBrowserDownloads.Record record = requireAdminDownload(request);
-            deleteDownloadRecord(record);
+            downloadController.delete(record);
             return new JSONObject().put("downloadId", record.id).put("deleted", true);
         }
         if (ReBrowserAdminProtocol.OP_CLEAR_DOWNLOADS.equals(operation)) {
-            int count = downloads.size();
-            for (ReBrowserDownloads.Record record : new ArrayList<>(downloads)) {
-                if (activeBlobTransfer != null && activeBlobTransfer.record == record) {
-                    failBlobTransfer(activeBlobTransfer, "administrator-cleared-downloads");
-                }
-                downloadStore.delete(record);
-            }
-            downloads.clear();
-            downloadStore.save(downloads);
-            return new JSONObject().put("deletedCount", count);
+            return new JSONObject().put("deletedCount", downloadController.clear());
         }
         if (ReBrowserAdminProtocol.OP_REPAIR_DOWNLOADS.equals(operation)) {
             return repairAdminDownloads();
@@ -828,21 +806,21 @@ public final class ReBrowserActivity extends Activity {
         value.put("pendingProfileDeletionCount",
                 workspaceController.pendingProfileDeletions().size());
         value.put("downloadRecordCount", downloads.size());
-        value.put("downloadsEnabled", downloadStore.downloadsEnabled());
-        value.put("pendingDownloadCount", pendingDownloadCount(null));
-        value.put("activeBlobTransfer", activeBlobTransfer != null);
+        value.put("downloadsEnabled", downloadController.downloadsEnabled());
+        value.put("pendingDownloadCount", downloadController.pendingCount());
+        value.put("activeBlobTransfer", downloadController.hasActiveBlobTransfer());
         return value;
     }
 
     private JSONObject createAdminDownloadPolicy() throws Exception {
         return new JSONObject()
-                .put("downloadsEnabled", downloadStore.downloadsEnabled())
+                .put("downloadsEnabled", downloadController.downloadsEnabled())
                 .put("scope", "ReBrowser-named-profiles-only")
                 .put("rateWindowSeconds", 300)
                 .put("ordinaryRequestsPerSite", 2)
                 .put("siteDefinition", "profileName+topLevelOrigin")
-                .put("maxPendingGlobal", MAX_PENDING_DOWNLOADS)
-                .put("maxPendingPerSite", MAX_PENDING_DOWNLOADS_PER_SITE)
+                .put("maxPendingGlobal", ReBrowserDownloadController.MAX_PENDING_GLOBAL)
+                .put("maxPendingPerSite", ReBrowserDownloadController.MAX_PENDING_PER_SITE)
                 .put("maxHistory", ReBrowserDownloads.MAX_RECORDS)
                 .put("maxBlobBytes", ReBrowserDownloads.MAX_BLOB_BYTES)
                 .put("maxDataBytes", ReBrowserDownloads.MAX_DATA_BYTES)
@@ -854,32 +832,20 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private JSONObject setAdminDownloadPolicy(JSONObject request) throws Exception {
-        boolean enabled = request.getBoolean("downloadsEnabled");
-        downloadStore.setDownloadsEnabled(enabled);
-        int rejectedPending = 0;
-        if (!enabled) {
-            for (ReBrowserDownloads.Record record : downloads) {
-                if (!ReBrowserDownloads.STATUS_PENDING.equals(record.status)) continue;
-                record.status = ReBrowserDownloads.STATUS_REJECTED;
-                record.error = "administrator-policy-disabled";
-                record.updatedAt = System.currentTimeMillis();
-                rejectedPending++;
-            }
-            downloadStore.save(downloads);
-        }
-        if (downloadOverviewVisible) showDownloadOverview();
+        int rejectedPending = downloadController.setDownloadsEnabled(
+                request.getBoolean("downloadsEnabled"));
         return createAdminDownloadPolicy().put("rejectedPendingCount", rejectedPending);
     }
 
     private JSONObject createAdminDownloads() throws Exception {
-        refreshDownloadStates();
+        downloadController.refresh();
         JSONArray values = new JSONArray();
         for (ReBrowserDownloads.Record record : downloads) {
             values.put(adminDownloadDetails(record));
         }
         return new JSONObject()
                 .put("downloads", values)
-                .put("pendingCount", pendingDownloadCount(null));
+                .put("pendingCount", downloadController.pendingCount());
     }
 
     private JSONObject adminDownloadDetails(ReBrowserDownloads.Record record) throws Exception {
@@ -925,37 +891,18 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private ReBrowserDownloads.Record requireAdminDownload(JSONObject request) {
-        ReBrowserDownloads.Record record = findDownload(request.optString("downloadId"));
+        ReBrowserDownloads.Record record = downloadController.find(
+                request.optString("downloadId"));
         if (record == null) throw new IllegalStateException("download-not-found");
         return record;
     }
 
     private JSONObject repairAdminDownloads() throws Exception {
-        int refreshed = 0;
-        int expired = 0;
-        int removedDeleted = 0;
-        for (ReBrowserDownloads.Record record : new ArrayList<>(downloads)) {
-            if (ReBrowserDownloads.STATUS_DOWNLOADING.equals(record.status)
-                    && downloadStore.refresh(record)) refreshed++;
-            if (ReBrowserDownloads.STATUS_PENDING.equals(record.status)
-                    && (!ReBrowserStore.isOwnedProfile(record.profileName)
-                    || ProfileStore.getInstance().getProfile(record.profileName) == null)) {
-                record.status = ReBrowserDownloads.STATUS_EXPIRED;
-                record.error = "profile-unavailable";
-                record.updatedAt = System.currentTimeMillis();
-                expired++;
-            }
-            if (ReBrowserDownloads.STATUS_DELETED.equals(record.status)) {
-                downloads.remove(record);
-                removedDeleted++;
-            }
-        }
-        trimDownloadHistory();
-        downloadStore.save(downloads);
-        return new JSONObject().put("refreshed", refreshed)
-                .put("expired", expired)
-                .put("removedDeleted", removedDeleted)
-                .put("remaining", downloads.size());
+        ReBrowserDownloadController.RepairResult result = downloadController.repair();
+        return new JSONObject().put("refreshed", result.refreshed)
+                .put("expired", result.expired)
+                .put("removedDeleted", result.removedDeleted)
+                .put("remaining", result.remaining);
     }
 
     private JSONObject createAdminState() throws Exception {
@@ -1294,9 +1241,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void destroyTabWebViews() {
-        if (activeBlobTransfer != null) {
-            failBlobTransfer(activeBlobTransfer, "blob-source-webview-destroyed");
-        }
+        downloadController.invalidatePageTransfers("blob-source-webview-destroyed");
         webController.destroyAll();
     }
 
@@ -2112,7 +2057,7 @@ public final class ReBrowserActivity extends Activity {
 
     private void showDownloadOverview() {
         if (activeWorkspace() == null) return;
-        refreshDownloadStates();
+        downloadController.refresh();
         downloadOverviewVisible = true;
         bookmarkOverviewVisible = false;
         workspaceBookmarkOverviewVisible = false;
@@ -2134,8 +2079,8 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private View createDownloadOverviewPage() {
-        int pending = pendingDownloadCount(null);
-        String subtitle = downloadStore.downloadsEnabled()
+        int pending = downloadController.pendingCount();
+        String subtitle = downloadController.downloadsEnabled()
                 ? pending == 0 ? downloads.size() + " 条记录"
                         : pending + " 个待确认 · " + downloads.size() + " 条记录"
                 : "管理员已暂停新下载 · " + downloads.size() + " 条记录";
@@ -2225,57 +2170,17 @@ public final class ReBrowserActivity extends Activity {
             new AlertDialog.Builder(this).setTitle("取消下载？")
                     .setMessage(record.fileName)
                     .setPositiveButton("取消下载", (dialog, which) -> {
-                        cancelDownload(record);
+                        downloadController.cancel(record);
                         showDownloadOverview();
                     }).setNegativeButton("继续", null).show();
         } else if (ReBrowserDownloads.STATUS_COMPLETED.equals(record.status)) {
             confirmOpenDownload(record);
         } else if (ReBrowserDownloads.STATUS_FAILED.equals(record.status)
                 || ReBrowserDownloads.STATUS_CANCELLED.equals(record.status)) {
-            retryDownload(record);
+            downloadController.retry(record);
         } else {
-            deleteDownloadRecord(record);
+            downloadController.delete(record);
         }
-    }
-
-    private void retryDownload(ReBrowserDownloads.Record record) {
-        if (!downloadStore.downloadsEnabled()) {
-            record.status = ReBrowserDownloads.STATUS_REJECTED;
-            record.error = "administrator-policy-disabled";
-            record.updatedAt = System.currentTimeMillis();
-            downloadStore.save(downloads);
-            showDownloadOverview();
-            toast("管理员已暂停 ReBrowser 新下载");
-            return;
-        }
-        if (!record.exactRequestAvailable) {
-            record.status = ReBrowserDownloads.STATUS_EXPIRED;
-            record.error = "exact-request-not-retained-after-restart";
-            record.updatedAt = System.currentTimeMillis();
-            downloadStore.save(downloads);
-            showDownloadOverview();
-            toast("为避免持久化网址令牌，请在原网页重新发起下载");
-            return;
-        }
-        int count = downloadStore.recordAttempt(
-                record.profileName + "|" + record.sourceOrigin, System.currentTimeMillis());
-        record.rateCount = count;
-        record.highFrequency = count >= 3;
-        record.systemId = -1L;
-        record.status = ReBrowserDownloads.STATUS_PENDING;
-        record.error = "";
-        record.updatedAt = System.currentTimeMillis();
-        downloadStore.save(downloads);
-        showDownloadOverview();
-        toast("重试请求已进入待确认列表");
-    }
-
-    private void cancelDownload(ReBrowserDownloads.Record record) {
-        if (activeBlobTransfer != null && activeBlobTransfer.record == record) {
-            failBlobTransfer(activeBlobTransfer, "download-cancelled");
-        }
-        downloadStore.cancel(record);
-        downloadStore.save(downloads);
     }
 
     private void confirmOpenDownload(ReBrowserDownloads.Record record) {
@@ -2291,7 +2196,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void openDownloadExternally(ReBrowserDownloads.Record record) {
-        Intent open = downloadStore.externalOpenIntent(record);
+        Intent open = downloadController.externalOpenIntent(record);
         if (open == null) {
             toast("下载文件已不存在");
             return;
@@ -2306,18 +2211,8 @@ public final class ReBrowserActivity extends Activity {
     private void confirmDeleteDownload(ReBrowserDownloads.Record record) {
         new AlertDialog.Builder(this).setTitle("删除下载文件和记录？")
                 .setMessage(record.fileName)
-                .setPositiveButton("删除", (dialog, which) -> deleteDownloadRecord(record))
+                .setPositiveButton("删除", (dialog, which) -> downloadController.delete(record))
                 .setNegativeButton("取消", null).show();
-    }
-
-    private void deleteDownloadRecord(ReBrowserDownloads.Record record) {
-        if (activeBlobTransfer != null && activeBlobTransfer.record == record) {
-            failBlobTransfer(activeBlobTransfer, "download-deleted");
-        }
-        downloadStore.delete(record);
-        downloads.remove(record);
-        downloadStore.save(downloads);
-        if (downloadOverviewVisible) showDownloadOverview();
     }
 
     private void showWorkspaceBookmarkOverview() {
@@ -2632,7 +2527,7 @@ public final class ReBrowserActivity extends Activity {
     protected void onResume() {
         super.onResume();
         webController.onResume();
-        refreshDownloadStates();
+        downloadController.refresh();
         if (downloadOverviewVisible) showDownloadOverview();
     }
 
@@ -2816,95 +2711,13 @@ public final class ReBrowserActivity extends Activity {
 
         @Override
         public void onDownloadRequested(ReBrowserWebController.DownloadRequest request) {
-            requestDownload(request);
+            downloadController.accept(request, activeWorkspace());
         }
 
         @Override
         public void onFileChooserUnavailable() {
             toast("没有可用的文件选择器");
         }
-    }
-
-    private void requestDownload(ReBrowserWebController.DownloadRequest request) {
-        ReBrowserStore.Workspace workspace = activeWorkspace();
-        ReBrowserStore.Tab tab = null;
-        if (workspace != null) {
-            for (ReBrowserStore.Tab candidate : workspace.tabs) {
-                if (candidate.id.equals(request.tabId)) {
-                    tab = candidate;
-                    break;
-                }
-            }
-        }
-        if (workspace == null || tab == null || !workspace.id.equals(request.workspaceId)
-                || !workspace.profileName.equals(request.profileName)
-                || !ReBrowserStore.isOwnedProfile(request.profileName)) {
-            toast("已拒绝来源不明确的下载");
-            return;
-        }
-        if (request.sourceOrigin.isBlank()) {
-            toast("已拒绝没有顶层网站来源的下载");
-            return;
-        }
-        String kind = ReBrowserDownloads.kind(request.url);
-        if (ReBrowserDownloads.KIND_HTTP.equals(kind)) {
-            String scheme = Uri.parse(request.url).getScheme();
-            if (!("https".equalsIgnoreCase(scheme) || "http".equalsIgnoreCase(scheme))) {
-                toast("仅允许 HTTP(S)、Blob 或 Data 下载");
-                return;
-            }
-        } else if (ReBrowserDownloads.KIND_BLOB.equals(kind)
-                && !request.url.startsWith("blob:" + request.sourceOrigin + "/")) {
-            toast("Blob 下载来源与当前顶层网站不一致");
-            return;
-        }
-        String siteKey = request.profileName + "|" + request.sourceOrigin;
-        int rateCount = downloadStore.recordAttempt(siteKey, System.currentTimeMillis());
-        boolean highFrequency = rateCount >= 3;
-        ReBrowserDownloads.Record record = downloadStore.create(
-                request.workspaceId, request.tabId, request.profileName,
-                request.sourceUrl, request.sourceOrigin, request.url,
-                request.userAgent, request.contentDisposition,
-                request.mimeType, request.contentLength, rateCount, highFrequency);
-        if (!makeDownloadRecordRoom()) {
-            toast("下载记录与活动任务已达到上限");
-            return;
-        }
-        downloads.add(0, record);
-        if (!downloadStore.downloadsEnabled()) {
-            record.status = ReBrowserDownloads.STATUS_REJECTED;
-            record.error = "administrator-policy-disabled";
-            record.updatedAt = System.currentTimeMillis();
-            downloadStore.save(downloads);
-            toast("管理员已暂停 ReBrowser 新下载");
-            return;
-        }
-        if (highFrequency) {
-            int global = pendingDownloadCount(null);
-            int perSite = pendingDownloadCount(siteKey);
-            if (global > MAX_PENDING_DOWNLOADS || perSite > MAX_PENDING_DOWNLOADS_PER_SITE) {
-                record.status = ReBrowserDownloads.STATUS_REJECTED;
-                record.error = "pending-queue-limit";
-                toast("该网站的高频下载请求过多，已拒绝");
-            } else {
-                toast("高频下载已拦截，请在“下载内容”中确认");
-            }
-            downloadStore.save(downloads);
-            return;
-        }
-        downloadStore.save(downloads);
-        showDownloadConfirmation(record, false);
-    }
-
-    private int pendingDownloadCount(String siteKey) {
-        int count = 0;
-        for (ReBrowserDownloads.Record record : downloads) {
-            if (!ReBrowserDownloads.STATUS_PENDING.equals(record.status)) continue;
-            if (siteKey == null || siteKey.equals(record.profileName + "|" + record.sourceOrigin)) {
-                count++;
-            }
-        }
-        return count;
     }
 
     private void showDownloadConfirmation(
@@ -2924,10 +2737,10 @@ public final class ReBrowserActivity extends Activity {
                     if (record.dangerous && !dangerAcknowledged) {
                         showDangerousDownloadConfirmation(record);
                     } else {
-                        approveDownload(record);
+                        downloadController.approve(record);
                     }
                 })
-                .setNegativeButton("拒绝", (dialog, which) -> rejectDownload(record))
+                .setNegativeButton("拒绝", (dialog, which) -> downloadController.reject(record))
                 .show();
     }
 
@@ -2936,390 +2749,32 @@ public final class ReBrowserActivity extends Activity {
                 .setTitle("危险文件二次确认")
                 .setMessage("ReBrowser 只会保存文件，不会自动打开、安装、预览、解压或执行。"
                         + "请仅在信任来源时继续。\n\n" + record.fileName)
-                .setPositiveButton("仍要下载", (dialog, which) -> approveDownload(record))
-                .setNegativeButton("拒绝", (dialog, which) -> rejectDownload(record))
+                .setPositiveButton("仍要下载", (dialog, which) -> downloadController.approve(record))
+                .setNegativeButton("拒绝", (dialog, which) -> downloadController.reject(record))
                 .show();
     }
 
-    private void approveDownload(ReBrowserDownloads.Record record) {
-        if (!ReBrowserDownloads.STATUS_PENDING.equals(record.status)) return;
-        if (!downloadStore.downloadsEnabled()) {
-            record.status = ReBrowserDownloads.STATUS_REJECTED;
-            record.error = "administrator-policy-disabled";
-            record.updatedAt = System.currentTimeMillis();
-            downloadStore.save(downloads);
-            toast("管理员已暂停 ReBrowser 新下载");
-            if (downloadOverviewVisible) showDownloadOverview();
-            return;
+    private final class DownloadListener implements ReBrowserDownloadController.Listener {
+        @Override
+        public void onDownloadRecordsChanged() {
+            if (downloadOverviewVisible && root != null) showDownloadOverview();
         }
-        if (!record.exactRequestAvailable) {
-            record.status = ReBrowserDownloads.STATUS_EXPIRED;
-            record.error = "exact-request-not-retained-after-restart";
-            record.updatedAt = System.currentTimeMillis();
-            downloadStore.save(downloads);
-            toast("为避免持久化网址令牌，请回到原网页重新发起下载");
-            return;
+
+        @Override
+        public void onDownloadConfirmationRequired(ReBrowserDownloads.Record record) {
+            showDownloadConfirmation(record, false);
         }
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
-                && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                        != PackageManager.PERMISSION_GRANTED) {
-            awaitingStorageDownloadId = record.id;
+
+        @Override
+        public void onDownloadMessage(String message) {
+            toast(message);
+        }
+
+        @Override
+        public void onStoragePermissionRequired() {
             requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
                     DOWNLOAD_STORAGE_REQUEST);
-            return;
         }
-        if (ReBrowserDownloads.KIND_DATA.equals(record.kind)) {
-            record.status = ReBrowserDownloads.STATUS_DOWNLOADING;
-            record.updatedAt = System.currentTimeMillis();
-            customDownloadIds.add(record.id);
-            downloadStore.save(downloads);
-            downloadStore.importDataAsync(record, () -> runOnUiThread(() -> {
-                customDownloadIds.remove(record.id);
-                downloadStore.save(downloads);
-                if (downloadOverviewVisible) showDownloadOverview();
-                toast(ReBrowserDownloads.STATUS_COMPLETED.equals(record.status)
-                        ? "Data 文件已保存；不会自动打开" : "Data 下载失败");
-            }));
-            return;
-        }
-        if (ReBrowserDownloads.KIND_BLOB.equals(record.kind)) {
-            startBlobTransfer(record);
-            return;
-        }
-        try {
-            if (!ReBrowserStore.isOwnedProfile(record.profileName)) {
-                throw new SecurityException("non-ReBrowser-profile");
-            }
-            String cookie = webController.cookieForHttpDownload(
-                    record.tabId, record.profileName, record.sourceOrigin, record.url);
-            String referer = record.sourceOrigin.equals(safeOrigin(record.url))
-                    ? record.sourceUrl : record.sourceOrigin + "/";
-            downloadStore.enqueueHttp(record, cookie, referer);
-            downloadStore.save(downloads);
-            toast("已开始下载；不会自动打开文件");
-            if (downloadOverviewVisible) showDownloadOverview();
-        } catch (Exception error) {
-            record.status = ReBrowserDownloads.STATUS_FAILED;
-            record.error = error.getClass().getSimpleName() + ":" + error.getMessage();
-            record.updatedAt = System.currentTimeMillis();
-            downloadStore.save(downloads);
-            toast("无法开始下载");
-        }
-    }
-
-    private void startBlobTransfer(ReBrowserDownloads.Record record) {
-        if (activeBlobTransfer != null) {
-            record.status = ReBrowserDownloads.STATUS_FAILED;
-            record.error = "another-blob-transfer-active";
-            downloadStore.save(downloads);
-            toast("一次只能提取一个 Blob 文件");
-            return;
-        }
-        BlobTransfer transfer = null;
-        try {
-            File directory = new File(getCacheDir(), "rebrowser-downloads");
-            if (!directory.exists() && !directory.mkdirs()) {
-                throw new IllegalStateException("temporary-directory-unavailable");
-            }
-            transfer = new BlobTransfer(
-                    record, new File(directory, record.id + ".part"));
-            activeBlobTransfer = transfer;
-            customDownloadIds.add(record.id);
-            record.status = ReBrowserDownloads.STATUS_DOWNLOADING;
-            record.updatedAt = System.currentTimeMillis();
-            downloadStore.save(downloads);
-            transfer.phaseDeadline = SystemClock.elapsedRealtime() + 30_000L;
-            BlobTransfer startedTransfer = transfer;
-            transfer.handle = webController.beginBlobTransfer(
-                    record.tabId, record.profileName, record.sourceOrigin,
-                    record.url, record.id, started -> {
-                        if (startedTransfer != activeBlobTransfer) return;
-                        if (!Boolean.TRUE.equals(started)) {
-                            failBlobTransfer(startedTransfer, "blob-initialization-failed");
-                        } else {
-                            pollBlobMetadata(startedTransfer);
-                        }
-                    });
-        } catch (Exception error) {
-            if (transfer != null || activeBlobTransfer != null) {
-                failBlobTransfer(transfer == null ? activeBlobTransfer : transfer,
-                        "blob-initialization-failed:" + error.getMessage());
-            } else {
-                record.status = ReBrowserDownloads.STATUS_FAILED;
-                record.error = "blob-initialization-failed:" + error.getMessage();
-                record.updatedAt = System.currentTimeMillis();
-                downloadStore.save(downloads);
-            }
-        }
-    }
-
-    private void pollBlobMetadata(BlobTransfer transfer) {
-        if (transfer != activeBlobTransfer) return;
-        try {
-            webController.pollBlobMetadata(transfer.handle,
-                    metadata -> handleBlobMetadataPoll(transfer, metadata));
-        } catch (Exception error) {
-            failBlobTransfer(transfer, "blob-metadata-invalid:" + error.getMessage());
-        }
-    }
-
-    private void handleBlobMetadataPoll(
-            BlobTransfer transfer,
-            ReBrowserWebController.BlobMetadata metadata
-    ) {
-        if (transfer != activeBlobTransfer) return;
-        try {
-            String status = metadata.status;
-            if ("loading".equals(status)) {
-                if (SystemClock.elapsedRealtime() >= transfer.phaseDeadline) {
-                    throw new IllegalStateException("blob-fetch-timeout");
-                }
-                root.postDelayed(() -> pollBlobMetadata(transfer), 50L);
-                return;
-            }
-            if (!"ready".equals(status)) {
-                throw new IllegalStateException(metadata.error.isBlank()
-                        ? "blob-fetch-failed" : metadata.error);
-            }
-            long size = metadata.size;
-            if (size < 0 || size > ReBrowserDownloads.MAX_BLOB_BYTES) {
-                throw new IllegalArgumentException("blob-size-limit");
-            }
-            if (size > new StatFs(transfer.temporary.getParent()).getAvailableBytes()) {
-                throw new IllegalStateException("insufficient-storage");
-            }
-            transfer.expectedSize = size;
-            transfer.record.totalSize = size;
-            String type = metadata.type;
-            if (!type.isBlank()) transfer.record.mimeType = type;
-            transfer.record.dangerous = ReBrowserDownloads.isDangerous(
-                    transfer.record.fileName, transfer.record.mimeType);
-            requestNextBlobChunk(transfer);
-        } catch (Exception error) {
-            failBlobTransfer(transfer, "blob-metadata-invalid:" + error.getMessage());
-        }
-    }
-
-    private void requestNextBlobChunk(BlobTransfer transfer) {
-        if (transfer != activeBlobTransfer) return;
-        if (transfer.offset >= transfer.expectedSize) {
-            finishBlobTransfer(transfer);
-            return;
-        }
-        long end = Math.min(transfer.expectedSize, transfer.offset + 128 * 1024L);
-        transfer.phaseDeadline = SystemClock.elapsedRealtime() + 30_000L;
-        try {
-            webController.requestBlobChunk(
-                    transfer.handle, transfer.offset, end, started -> {
-                        if (transfer != activeBlobTransfer) return;
-                        if (!Boolean.TRUE.equals(started)) {
-                            failBlobTransfer(transfer, "blob-chunk-start-failed");
-                        } else {
-                            pollBlobChunk(transfer);
-                        }
-                    });
-        } catch (Exception error) {
-            failBlobTransfer(transfer, "blob-source-page-changed:" + error.getMessage());
-        }
-    }
-
-    private void pollBlobChunk(BlobTransfer transfer) {
-        if (transfer != activeBlobTransfer) return;
-        try {
-            webController.pollBlobChunk(transfer.handle,
-                    chunk -> handleBlobChunkPoll(transfer, chunk));
-        } catch (Exception error) {
-            failBlobTransfer(transfer, "blob-chunk-failed:" + error.getMessage());
-        }
-    }
-
-    private void handleBlobChunkPoll(
-            BlobTransfer transfer,
-            ReBrowserWebController.BlobChunk chunkResult
-    ) {
-        if (transfer != activeBlobTransfer) return;
-        try {
-            String status = chunkResult.status;
-            if ("loading".equals(status)) {
-                if (SystemClock.elapsedRealtime() >= transfer.phaseDeadline) {
-                    throw new IllegalStateException("blob-chunk-timeout");
-                }
-                root.postDelayed(() -> pollBlobChunk(transfer), 50L);
-                return;
-            }
-            if (!"ready".equals(status)) {
-                throw new IllegalStateException(chunkResult.error.isBlank()
-                        ? "blob-chunk-failed" : chunkResult.error);
-            }
-            String encoded = chunkResult.data;
-            if (encoded.isBlank()) throw new IllegalStateException("empty-blob-chunk");
-            byte[] chunk = Base64.decode(encoded, Base64.DEFAULT);
-            long remaining = transfer.expectedSize - transfer.offset;
-            if (chunk.length <= 0 || chunk.length > remaining || chunk.length > 128 * 1024) {
-                throw new IllegalStateException("invalid-blob-chunk-size");
-            }
-            transfer.output.write(chunk);
-            transfer.digest.update(chunk);
-            transfer.offset += chunk.length;
-            transfer.record.downloadedBytes = transfer.offset;
-            transfer.record.updatedAt = System.currentTimeMillis();
-            if (transfer.offset % (1024 * 1024L) < chunk.length) {
-                downloadStore.save(downloads);
-            }
-            requestNextBlobChunk(transfer);
-        } catch (Exception error) {
-            failBlobTransfer(transfer, "blob-chunk-failed:" + error.getMessage());
-        }
-    }
-
-    private void finishBlobTransfer(BlobTransfer transfer) {
-        if (transfer != activeBlobTransfer) return;
-        try {
-            transfer.output.close();
-            transfer.output = null;
-            if (transfer.temporary.length() != transfer.expectedSize) {
-                throw new IllegalStateException("blob-size-mismatch");
-            }
-            String digest = hexDigest(transfer.digest.digest());
-            cleanupBlobJavascript(transfer);
-            activeBlobTransfer = null;
-            downloadStore.publishTemporaryFileAsync(
-                    transfer.record, transfer.temporary, digest,
-                    () -> runOnUiThread(() -> {
-                        customDownloadIds.remove(transfer.record.id);
-                        downloadStore.save(downloads);
-                        if (downloadOverviewVisible) showDownloadOverview();
-                        toast(ReBrowserDownloads.STATUS_COMPLETED.equals(transfer.record.status)
-                                ? "Blob 文件已保存；不会自动打开" : "Blob 文件保存失败");
-                    }));
-        } catch (Exception error) {
-            failBlobTransfer(transfer, "blob-finalization-failed:" + error.getMessage());
-        }
-    }
-
-    private void failBlobTransfer(BlobTransfer transfer, String reason) {
-        if (transfer == null) return;
-        try {
-            if (transfer.output != null) transfer.output.close();
-        } catch (Exception ignored) {
-            // Failure path continues with deletion.
-        }
-        transfer.temporary.delete();
-        cleanupBlobJavascript(transfer);
-        customDownloadIds.remove(transfer.record.id);
-        transfer.record.status = ReBrowserDownloads.STATUS_FAILED;
-        transfer.record.error = reason == null ? "blob-transfer-failed"
-                : reason.substring(0, Math.min(300, reason.length()));
-        transfer.record.updatedAt = System.currentTimeMillis();
-        if (activeBlobTransfer == transfer) activeBlobTransfer = null;
-        downloadStore.save(downloads);
-        if (downloadOverviewVisible) showDownloadOverview();
-    }
-
-    private void cleanupBlobJavascript(BlobTransfer transfer) {
-        if (transfer.handle != null) webController.endBlobTransfer(transfer.handle);
-    }
-
-    private static String hexDigest(byte[] value) {
-        StringBuilder output = new StringBuilder(value.length * 2);
-        for (byte item : value) output.append(String.format(java.util.Locale.ROOT, "%02x", item));
-        return output.toString();
-    }
-
-    private void rejectDownload(ReBrowserDownloads.Record record) {
-        if (!ReBrowserDownloads.STATUS_PENDING.equals(record.status)) return;
-        record.status = ReBrowserDownloads.STATUS_REJECTED;
-        record.updatedAt = System.currentTimeMillis();
-        downloadStore.save(downloads);
-        if (downloadOverviewVisible) showDownloadOverview();
-    }
-
-    private void refreshDownloadStates() {
-        if (downloadStore == null) return;
-        boolean changed = false;
-        for (ReBrowserDownloads.Record record : downloads) {
-            if (ReBrowserDownloads.STATUS_PENDING.equals(record.status)
-                    && !record.exactRequestAvailable) {
-                record.status = ReBrowserDownloads.STATUS_EXPIRED;
-                record.error = "exact-request-not-retained-after-restart";
-                record.updatedAt = System.currentTimeMillis();
-                changed = true;
-            }
-            if (ReBrowserDownloads.STATUS_DOWNLOADING.equals(record.status)) {
-                if (record.systemId < 0 && !customDownloadIds.contains(record.id)) {
-                    record.status = ReBrowserDownloads.STATUS_FAILED;
-                    record.error = "custom-download-interrupted";
-                    record.updatedAt = System.currentTimeMillis();
-                    changed = true;
-                } else {
-                    changed |= downloadStore.refresh(record);
-                }
-            }
-            if (ReBrowserDownloads.STATUS_COMPLETED.equals(record.status)
-                    && !record.hashAttempted
-                    && (record.sha256 == null || record.sha256.isBlank())
-                    && hashingDownloadIds.add(record.id)) {
-                downloadStore.computeSha256Async(record, () -> runOnUiThread(() -> {
-                    hashingDownloadIds.remove(record.id);
-                    downloadStore.save(downloads);
-                    if (downloadOverviewVisible) showDownloadOverview();
-                }));
-            }
-        }
-        if (changed) downloadStore.save(downloads);
-    }
-
-    private boolean makeDownloadRecordRoom() {
-        while (downloads.size() >= ReBrowserDownloads.MAX_RECORDS) {
-            int removable = findOldestRemovableDownload();
-            if (removable < 0) return false;
-            downloads.remove(removable);
-        }
-        return true;
-    }
-
-    private void trimDownloadHistory() {
-        while (downloads.size() > ReBrowserDownloads.MAX_RECORDS) {
-            int removable = findOldestRemovableDownload();
-            if (removable < 0) return;
-            downloads.remove(removable);
-        }
-    }
-
-    private int findOldestRemovableDownload() {
-        for (int index = downloads.size() - 1; index >= 0; index--) {
-            ReBrowserDownloads.Record record = downloads.get(index);
-            if (!ReBrowserDownloads.STATUS_DOWNLOADING.equals(record.status)
-                    && !ReBrowserDownloads.STATUS_PENDING.equals(record.status)) {
-                return index;
-            }
-        }
-        return -1;
-    }
-
-    private static final class BlobTransfer {
-        final ReBrowserDownloads.Record record;
-        final File temporary;
-        ReBrowserWebController.BlobHandle handle;
-        FileOutputStream output;
-        MessageDigest digest;
-        long expectedSize;
-        long offset;
-        long phaseDeadline;
-
-        BlobTransfer(ReBrowserDownloads.Record record, File temporary) throws Exception {
-            this.record = record;
-            this.temporary = temporary;
-            output = new FileOutputStream(temporary);
-            digest = MessageDigest.getInstance("SHA-256");
-        }
-    }
-
-    private ReBrowserDownloads.Record findDownload(String id) {
-        for (ReBrowserDownloads.Record record : downloads) {
-            if (record.id.equals(id)) return record;
-        }
-        return null;
     }
 
     @Override
@@ -3330,17 +2785,8 @@ public final class ReBrowserActivity extends Activity {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode != DOWNLOAD_STORAGE_REQUEST) return;
-        ReBrowserDownloads.Record record = findDownload(awaitingStorageDownloadId);
-        awaitingStorageDownloadId = null;
-        if (record == null) return;
-        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            approveDownload(record);
-        } else {
-            record.status = ReBrowserDownloads.STATUS_FAILED;
-            record.error = "storage-permission-denied";
-            record.updatedAt = System.currentTimeMillis();
-            downloadStore.save(downloads);
-            toast("没有存储权限，无法下载");
-        }
+        downloadController.onStoragePermissionResult(
+                grantResults.length > 0
+                        && grantResults[0] == PackageManager.PERMISSION_GRANTED);
     }
 }

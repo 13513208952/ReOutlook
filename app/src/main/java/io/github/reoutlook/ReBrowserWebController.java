@@ -32,7 +32,7 @@ import java.util.Map;
 
 /** Owns every ReBrowser WebView, callback installation, and page execution boundary. */
 @SuppressLint("RequiresFeature") // Activity constructs this only after the Multi-Profile gate.
-final class ReBrowserWebController {
+final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
     interface Listener {
         void onPageStarted(ReBrowserStore.Tab tab, String url, boolean visible);
         void onPageFinished(ReBrowserStore.Tab tab, String url, String title, boolean visible);
@@ -111,57 +111,6 @@ final class ReBrowserWebController {
             this.tab = tab;
             this.url = url;
             this.title = title;
-        }
-    }
-
-    static final class BlobHandle {
-        final String tabId;
-        final String profileName;
-        final String origin;
-        final String key;
-        final long pageGeneration;
-        final long navigationGeneration;
-
-        BlobHandle(
-                String tabId,
-                String profileName,
-                String origin,
-                String key,
-                long pageGeneration,
-                long navigationGeneration
-        ) {
-            this.tabId = tabId;
-            this.profileName = profileName;
-            this.origin = origin;
-            this.key = key;
-            this.pageGeneration = pageGeneration;
-            this.navigationGeneration = navigationGeneration;
-        }
-    }
-
-    static final class BlobMetadata {
-        final String status;
-        final String error;
-        final long size;
-        final String type;
-
-        BlobMetadata(String status, String error, long size, String type) {
-            this.status = status;
-            this.error = error;
-            this.size = size;
-            this.type = type;
-        }
-    }
-
-    static final class BlobChunk {
-        final String status;
-        final String error;
-        final String data;
-
-        BlobChunk(String status, String error, String data) {
-            this.status = status;
-            this.error = error;
-            this.data = data;
         }
     }
 
@@ -411,7 +360,8 @@ final class ReBrowserWebController {
         pendingFileChooser = null;
     }
 
-    String cookieForHttpDownload(
+    @Override
+    public String cookieForHttpDownload(
             String tabId,
             String profileName,
             String sourceOrigin,
@@ -423,7 +373,8 @@ final class ReBrowserWebController {
         return profile.getCookieManager().getCookie(requestUrl);
     }
 
-    BlobHandle beginBlobTransfer(
+    @Override
+    public BlobHandle beginBlobTransfer(
             String tabId,
             String profileName,
             String origin,
@@ -450,7 +401,8 @@ final class ReBrowserWebController {
         return handle;
     }
 
-    void pollBlobMetadata(BlobHandle handle, ValueCallback<BlobMetadata> callback) {
+    @Override
+    public void pollBlobMetadata(BlobHandle handle, ValueCallback<BlobMetadata> callback) {
         PageBinding page = requireBlobPage(handle);
         String key = JSONObject.quote(handle.key);
         String script = "(()=>{const s=window[" + key + "];if(!s)return JSON.stringify("
@@ -469,7 +421,8 @@ final class ReBrowserWebController {
         });
     }
 
-    void requestBlobChunk(
+    @Override
+    public void requestBlobChunk(
             BlobHandle handle,
             long offset,
             long end,
@@ -488,7 +441,8 @@ final class ReBrowserWebController {
                 Boolean.TRUE.equals(decodeBoolean(result))));
     }
 
-    void pollBlobChunk(BlobHandle handle, ValueCallback<BlobChunk> callback) {
+    @Override
+    public void pollBlobChunk(BlobHandle handle, ValueCallback<BlobChunk> callback) {
         PageBinding page = requireBlobPage(handle);
         String key = JSONObject.quote(handle.key);
         String script = "(()=>{const s=window[" + key + "];if(!s)return JSON.stringify("
@@ -507,7 +461,8 @@ final class ReBrowserWebController {
         });
     }
 
-    void endBlobTransfer(BlobHandle handle) {
+    @Override
+    public void endBlobTransfer(BlobHandle handle) {
         PageBinding page = pagesByTabId.get(handle.tabId);
         if (page == null || page.generation != handle.pageGeneration
                 || page.navigationGeneration != handle.navigationGeneration
