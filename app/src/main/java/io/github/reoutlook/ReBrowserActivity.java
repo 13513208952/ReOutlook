@@ -1,5 +1,6 @@
 package io.github.reoutlook;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
@@ -7,6 +8,7 @@ import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
@@ -18,6 +20,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Message;
 import android.os.SystemClock;
+import android.os.StatFs;
+import android.util.Base64;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -45,12 +49,18 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.webkit.Profile;
 import androidx.webkit.ProfileStore;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.json.JSONTokener;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.security.MessageDigest;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -65,11 +75,15 @@ public final class ReBrowserActivity extends Activity {
     static final String ACTION_ADMIN_COMMAND = "io.github.reoutlook.action.REBROWSER_ADMIN";
     static final String EXTRA_ADMIN_REQUEST = "adminRequest";
     private static final int FILE_CHOOSER_REQUEST = 5102;
+    private static final int DOWNLOAD_STORAGE_REQUEST = 5103;
+    private static final int MAX_PENDING_DOWNLOADS = 32;
+    private static final int MAX_PENDING_DOWNLOADS_PER_SITE = 8;
     private static final long DOUBLE_BACK_INTERVAL_MS = 2_000L;
 
     private final List<ReBrowserStore.Workspace> workspaces = new ArrayList<>();
     private final List<ReBrowserStore.Workspace> shelvedSecondaryWorkspaces = new ArrayList<>();
     private final List<ReBrowserFavorites.Favorite> bookmarks = new ArrayList<>();
+    private final List<ReBrowserDownloads.Record> downloads = new ArrayList<>();
     private final Map<String, WebView> tabWebViews = new HashMap<>();
     private final Map<WebView, ReBrowserStore.Tab> webViewTabs = new IdentityHashMap<>();
     private final Set<String> loadedTabIds = new java.util.HashSet<>();
@@ -78,11 +92,14 @@ public final class ReBrowserActivity extends Activity {
     private final Map<String, Integer> tabLoadProgress = new HashMap<>();
     private final Map<String, String> tabLastErrors = new HashMap<>();
     private final Set<String> loadingTabIds = new java.util.HashSet<>();
+    private final Set<String> hashingDownloadIds = new java.util.HashSet<>();
+    private final Set<String> customDownloadIds = new java.util.HashSet<>();
     private final Map<String, JSONObject> pendingAdminLoads = new HashMap<>();
 
     private ReBrowserStore store;
     private ReBrowserPreferences browserPreferences;
     private ReBrowserFavorites bookmarkStore;
+    private ReBrowserDownloads downloadStore;
     private ReBrowserStore.Workspace activeWorkspace;
     private FrameLayout root;
     private FrameLayout webContainer;
@@ -95,6 +112,14 @@ public final class ReBrowserActivity extends Activity {
     private boolean childOverviewVisible;
     private boolean bookmarkOverviewVisible;
     private boolean workspaceBookmarkOverviewVisible;
+    private boolean downloadOverviewVisible;
+    private String awaitingStorageDownloadId;
+    private BlobTransfer activeBlobTransfer;
+    private final Runnable downloadRefreshRunnable = () -> {
+        if (!downloadOverviewVisible || root == null) return;
+        refreshDownloadStates();
+        showDownloadOverview();
+    };
     private boolean workspaceSelectionMode;
     private boolean childSelectionMode;
     private long lastBackPressAt;
@@ -112,6 +137,9 @@ public final class ReBrowserActivity extends Activity {
         applyGlobalOrientationPreference();
         bookmarkStore = new ReBrowserFavorites(this);
         bookmarks.addAll(bookmarkStore.load());
+        downloadStore = new ReBrowserDownloads(this);
+        downloads.addAll(downloadStore.load());
+        refreshDownloadStates();
         root = createRoot();
         setContentView(root);
 
@@ -349,7 +377,7 @@ public final class ReBrowserActivity extends Activity {
         settings.setSafeBrowsingEnabled(true);
         webView.setWebViewClient(new WorkspaceWebViewClient());
         webView.setWebChromeClient(new WorkspaceChromeClient());
-        webView.setDownloadListener(new ExternalDownloadListener());
+        webView.setDownloadListener(new WorkspaceDownloadListener(webView, profileName));
         applyBrowserPreferences(webView);
         webViewTabs.put(webView, tab);
         return webView;
@@ -420,6 +448,34 @@ public final class ReBrowserActivity extends Activity {
         }
         if (bookmarkOverviewVisible) showBookmarkOverview();
         toast("已添加到收藏栏");
+    }
+
+    private void showEditBookmarkDialog(ReBrowserFavorites.Favorite bookmark) {
+        LinearLayout fields = new LinearLayout(this);
+        fields.setOrientation(LinearLayout.VERTICAL);
+        fields.setPadding(dp(20), 0, dp(20), 0);
+        EditText title = new EditText(this);
+        title.setHint("标题");
+        title.setSingleLine(true);
+        title.setText(bookmark.title);
+        EditText url = new EditText(this);
+        url.setHint("https://…");
+        url.setSingleLine(true);
+        url.setText(bookmark.url);
+        fields.addView(title, matchWrap());
+        fields.addView(url, matchWrap());
+        new AlertDialog.Builder(this)
+                .setTitle("编辑收藏")
+                .setView(fields)
+                .setPositiveButton("保存", (dialog, which) -> {
+                    if (!bookmarkStore.update(bookmarks, bookmark,
+                            title.getText().toString(), url.getText().toString())) {
+                        toast("网址无效或已经收藏");
+                    }
+                    showBookmarkOverview();
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     private void confirmRemoveBookmark(ReBrowserFavorites.Favorite bookmark) {
@@ -495,6 +551,15 @@ public final class ReBrowserActivity extends Activity {
         if (ReBrowserAdminProtocol.OP_GET_DIAGNOSTICS.equals(operation)) {
             return createAdminDiagnostics();
         }
+        if (ReBrowserAdminProtocol.OP_GET_DOWNLOAD_POLICY.equals(operation)) {
+            return createAdminDownloadPolicy();
+        }
+        if (ReBrowserAdminProtocol.OP_SET_DOWNLOAD_POLICY.equals(operation)) {
+            return setAdminDownloadPolicy(request);
+        }
+        if (ReBrowserAdminProtocol.OP_GET_DOWNLOADS.equals(operation)) {
+            return createAdminDownloads();
+        }
         if (activeWorkspace == null) throw new IllegalStateException("ReBrowser-disabled");
         if (ReBrowserAdminProtocol.OP_GET_STATE.equals(operation)) return createAdminState();
         if (ReBrowserAdminProtocol.OP_VALIDATE_STATE.equals(operation)) return validateAdminState();
@@ -530,6 +595,10 @@ public final class ReBrowserActivity extends Activity {
         if (ReBrowserAdminProtocol.OP_OPEN_SETTINGS.equals(operation)) {
             startActivity(new Intent(this, ReBrowserSettingsActivity.class));
             return new JSONObject().put("view", "settings");
+        }
+        if (ReBrowserAdminProtocol.OP_SHOW_DOWNLOADS.equals(operation)) {
+            showDownloadOverview();
+            return new JSONObject().put("view", "downloads");
         }
         if (ReBrowserAdminProtocol.OP_ACTIVATE_WORKSPACE.equals(operation)) {
             ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
@@ -627,6 +696,49 @@ public final class ReBrowserActivity extends Activity {
             closeTab(tab);
             return new JSONObject().put("workspaceId", workspace.id)
                     .put("tabId", tabId).put("closed", true);
+        }
+        if (ReBrowserAdminProtocol.OP_APPROVE_DOWNLOAD.equals(operation)) {
+            ReBrowserDownloads.Record record = requireAdminDownload(request);
+            approveDownload(record);
+            return adminDownloadDetails(record);
+        }
+        if (ReBrowserAdminProtocol.OP_REJECT_DOWNLOAD.equals(operation)) {
+            ReBrowserDownloads.Record record = requireAdminDownload(request);
+            rejectDownload(record);
+            return adminDownloadDetails(record);
+        }
+        if (ReBrowserAdminProtocol.OP_CANCEL_DOWNLOAD.equals(operation)) {
+            ReBrowserDownloads.Record record = requireAdminDownload(request);
+            if (!ReBrowserDownloads.STATUS_DOWNLOADING.equals(record.status)) {
+                throw new IllegalStateException("download-not-running");
+            }
+            cancelDownload(record);
+            return adminDownloadDetails(record);
+        }
+        if (ReBrowserAdminProtocol.OP_RETRY_DOWNLOAD.equals(operation)) {
+            ReBrowserDownloads.Record record = requireAdminDownload(request);
+            retryDownload(record);
+            return adminDownloadDetails(record);
+        }
+        if (ReBrowserAdminProtocol.OP_DELETE_DOWNLOAD.equals(operation)) {
+            ReBrowserDownloads.Record record = requireAdminDownload(request);
+            deleteDownloadRecord(record);
+            return new JSONObject().put("downloadId", record.id).put("deleted", true);
+        }
+        if (ReBrowserAdminProtocol.OP_CLEAR_DOWNLOADS.equals(operation)) {
+            int count = downloads.size();
+            for (ReBrowserDownloads.Record record : new ArrayList<>(downloads)) {
+                if (activeBlobTransfer != null && activeBlobTransfer.record == record) {
+                    failBlobTransfer(activeBlobTransfer, "administrator-cleared-downloads");
+                }
+                downloadStore.delete(record);
+            }
+            downloads.clear();
+            downloadStore.save(downloads);
+            return new JSONObject().put("deletedCount", count);
+        }
+        if (ReBrowserAdminProtocol.OP_REPAIR_DOWNLOADS.equals(operation)) {
+            return repairAdminDownloads();
         }
         if (ReBrowserAdminProtocol.OP_DELETE_SHELVED.equals(operation)) {
             ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, true);
@@ -784,6 +896,7 @@ public final class ReBrowserActivity extends Activity {
         value.put("deleteBrowsingData",
                 WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA));
         value.put("saveState", WebViewFeature.isFeatureSupported(WebViewFeature.SAVE_STATE));
+        value.put("downloads", createAdminDownloadPolicy());
         return value;
     }
 
@@ -811,7 +924,135 @@ public final class ReBrowserActivity extends Activity {
         value.put("shelvedWorkspaceCount", shelvedSecondaryWorkspaces.size());
         value.put("pendingProfileDeletionCount", store == null
                 ? 0 : store.pendingProfileDeletions().size());
+        value.put("downloadRecordCount", downloads.size());
+        value.put("downloadsEnabled", downloadStore.downloadsEnabled());
+        value.put("pendingDownloadCount", pendingDownloadCount(null));
+        value.put("activeBlobTransfer", activeBlobTransfer != null);
         return value;
+    }
+
+    private JSONObject createAdminDownloadPolicy() throws Exception {
+        return new JSONObject()
+                .put("downloadsEnabled", downloadStore.downloadsEnabled())
+                .put("scope", "ReBrowser-named-profiles-only")
+                .put("rateWindowSeconds", 300)
+                .put("ordinaryRequestsPerSite", 2)
+                .put("siteDefinition", "profileName+topLevelOrigin")
+                .put("maxPendingGlobal", MAX_PENDING_DOWNLOADS)
+                .put("maxPendingPerSite", MAX_PENDING_DOWNLOADS_PER_SITE)
+                .put("maxHistory", ReBrowserDownloads.MAX_RECORDS)
+                .put("maxBlobBytes", ReBrowserDownloads.MAX_BLOB_BYTES)
+                .put("maxDataBytes", ReBrowserDownloads.MAX_DATA_BYTES)
+                .put("automaticOpen", false)
+                .put("automaticInstall", false)
+                .put("rawCookieDisclosure", false)
+                .put("policyEffect", "new-and-pending-requests")
+                .put("runningDownloadsContinueWhenDisabled", true);
+    }
+
+    private JSONObject setAdminDownloadPolicy(JSONObject request) throws Exception {
+        boolean enabled = request.getBoolean("downloadsEnabled");
+        downloadStore.setDownloadsEnabled(enabled);
+        int rejectedPending = 0;
+        if (!enabled) {
+            for (ReBrowserDownloads.Record record : downloads) {
+                if (!ReBrowserDownloads.STATUS_PENDING.equals(record.status)) continue;
+                record.status = ReBrowserDownloads.STATUS_REJECTED;
+                record.error = "administrator-policy-disabled";
+                record.updatedAt = System.currentTimeMillis();
+                rejectedPending++;
+            }
+            downloadStore.save(downloads);
+        }
+        if (downloadOverviewVisible) showDownloadOverview();
+        return createAdminDownloadPolicy().put("rejectedPendingCount", rejectedPending);
+    }
+
+    private JSONObject createAdminDownloads() throws Exception {
+        refreshDownloadStates();
+        JSONArray values = new JSONArray();
+        for (ReBrowserDownloads.Record record : downloads) {
+            values.put(adminDownloadDetails(record));
+        }
+        return new JSONObject()
+                .put("downloads", values)
+                .put("pendingCount", pendingDownloadCount(null));
+    }
+
+    private JSONObject adminDownloadDetails(ReBrowserDownloads.Record record) throws Exception {
+        JSONObject value = new JSONObject();
+        value.put("downloadId", record.id);
+        value.put("kind", record.kind);
+        value.put("workspaceId", record.workspaceId);
+        value.put("tabId", record.tabId);
+        value.put("profileName", record.profileName);
+        value.put("sourceOrigin", record.sourceOrigin);
+        value.put("requestLocation", redactedDownloadLocation(record.url));
+        value.put("fileName", record.fileName);
+        value.put("mimeType", record.mimeType);
+        value.put("declaredSize", record.declaredSize);
+        value.put("downloadedBytes", record.downloadedBytes);
+        value.put("totalSize", record.totalSize);
+        value.put("status", record.status);
+        value.put("systemDownloadId", record.systemId);
+        value.put("sha256", record.sha256 == null ? "" : record.sha256);
+        value.put("hashAttempted", record.hashAttempted);
+        value.put("dangerous", record.dangerous);
+        value.put("riskReasons", record.riskReasons == null ? "" : record.riskReasons);
+        value.put("highFrequency", record.highFrequency);
+        value.put("rateCount", record.rateCount);
+        value.put("authenticatedRequest", record.cookieAttached);
+        value.put("createdAt", record.createdAt);
+        value.put("updatedAt", record.updatedAt);
+        value.put("error", record.error == null ? "" : record.error);
+        return value;
+    }
+
+    private static String redactedDownloadLocation(String value) {
+        try {
+            Uri uri = Uri.parse(value);
+            String scheme = uri.getScheme();
+            if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))) {
+                return scheme == null ? "" : scheme.toLowerCase(java.util.Locale.ROOT) + ":";
+            }
+            return safeOrigin(value);
+        } catch (RuntimeException ignored) {
+            return "";
+        }
+    }
+
+    private ReBrowserDownloads.Record requireAdminDownload(JSONObject request) {
+        ReBrowserDownloads.Record record = findDownload(request.optString("downloadId"));
+        if (record == null) throw new IllegalStateException("download-not-found");
+        return record;
+    }
+
+    private JSONObject repairAdminDownloads() throws Exception {
+        int refreshed = 0;
+        int expired = 0;
+        int removedDeleted = 0;
+        for (ReBrowserDownloads.Record record : new ArrayList<>(downloads)) {
+            if (ReBrowserDownloads.STATUS_DOWNLOADING.equals(record.status)
+                    && downloadStore.refresh(record)) refreshed++;
+            if (ReBrowserDownloads.STATUS_PENDING.equals(record.status)
+                    && (!ReBrowserStore.isOwnedProfile(record.profileName)
+                    || ProfileStore.getInstance().getProfile(record.profileName) == null)) {
+                record.status = ReBrowserDownloads.STATUS_EXPIRED;
+                record.error = "profile-unavailable";
+                record.updatedAt = System.currentTimeMillis();
+                expired++;
+            }
+            if (ReBrowserDownloads.STATUS_DELETED.equals(record.status)) {
+                downloads.remove(record);
+                removedDeleted++;
+            }
+        }
+        trimDownloadHistory();
+        downloadStore.save(downloads);
+        return new JSONObject().put("refreshed", refreshed)
+                .put("expired", expired)
+                .put("removedDeleted", removedDeleted)
+                .put("remaining", downloads.size());
     }
 
     private JSONObject createAdminState() throws Exception {
@@ -1183,6 +1424,9 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void destroyTabWebViews() {
+        if (activeBlobTransfer != null) {
+            failBlobTransfer(activeBlobTransfer, "blob-source-webview-destroyed");
+        }
         webContainer.removeAllViews();
         for (WebView webView : tabWebViews.values()) {
             webView.stopLoading();
@@ -1300,6 +1544,10 @@ public final class ReBrowserActivity extends Activity {
         panel.addView(menuDivider(), new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
 
+        addMenuListItem(panel, R.drawable.ic_rb_download, "下载内容", () -> {
+            popup.dismiss();
+            showDownloadOverview();
+        });
         addMenuListItem(panel, R.drawable.ic_rb_star_filled, "收藏夹", () -> {
             popup.dismiss();
             showBookmarkOverview();
@@ -1722,6 +1970,7 @@ public final class ReBrowserActivity extends Activity {
         childOverviewVisible = false;
         bookmarkOverviewVisible = false;
         workspaceBookmarkOverviewVisible = false;
+        downloadOverviewVisible = false;
         setBrowserContentVisible(false);
         overviewContainer.removeAllViews();
         overviewContainer.addView(createWorkspaceOverviewPage(), matchMatch());
@@ -1921,6 +2170,7 @@ public final class ReBrowserActivity extends Activity {
         workspaceOverviewVisible = false;
         bookmarkOverviewVisible = false;
         workspaceBookmarkOverviewVisible = false;
+        downloadOverviewVisible = false;
         setBrowserContentVisible(false);
         overviewContainer.removeAllViews();
         overviewContainer.addView(createChildOverviewPage(), matchMatch());
@@ -2026,6 +2276,7 @@ public final class ReBrowserActivity extends Activity {
         workspaceOverviewVisible = false;
         childOverviewVisible = false;
         workspaceBookmarkOverviewVisible = false;
+        downloadOverviewVisible = false;
         setBrowserContentVisible(false);
         overviewContainer.removeAllViews();
         overviewContainer.addView(createBookmarkOverviewPage(), matchMatch());
@@ -2050,63 +2301,261 @@ public final class ReBrowserActivity extends Activity {
             return page;
         }
 
-        GridLayout grid = new GridLayout(this);
-        grid.setColumnCount(2);
-        grid.setPadding(dp(8), dp(8), dp(8), dp(28));
-        int cardWidth = Math.max(dp(150),
-                (getResources().getDisplayMetrics().widthPixels - dp(40)) / 2);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(8), dp(8), dp(8), dp(28));
         for (ReBrowserFavorites.Favorite bookmark : new ArrayList<>(bookmarks)) {
-            LinearLayout card = new LinearLayout(this);
-            card.setOrientation(LinearLayout.VERTICAL);
-            card.setPadding(dp(14), dp(12), dp(10), dp(12));
-            card.setElevation(dp(2));
-            card.setBackground(roundedBackground(Color.WHITE, dp(18)));
-            card.setOnClickListener(view -> {
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(12), dp(7), dp(6), dp(7));
+            row.setBackground(roundedBackground(Color.WHITE, dp(10)));
+            LinearLayout labels = new LinearLayout(this);
+            labels.setOrientation(LinearLayout.VERTICAL);
+            labels.setGravity(Gravity.CENTER_VERTICAL);
+            labels.setOnClickListener(view -> {
                 hideOverview();
                 navigateActiveTab(bookmark.url);
             });
-
-            LinearLayout heading = new LinearLayout(this);
-            heading.setGravity(Gravity.CENTER_VERTICAL);
-            TextView icon = new TextView(this);
-            icon.setText("★");
-            icon.setTextSize(17);
-            icon.setTextColor(Color.WHITE);
-            icon.setGravity(Gravity.CENTER);
-            icon.setBackground(roundedBackground(Color.rgb(242, 167, 48), dp(16)));
-            heading.addView(icon, new LinearLayout.LayoutParams(dp(32), dp(32)));
-            heading.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
-            TextView remove = toolbarButton("×", "删除收藏 " + bookmark.title);
-            remove.setOnClickListener(view -> confirmRemoveBookmark(bookmark));
-            heading.addView(remove, new LinearLayout.LayoutParams(dp(36), dp(36)));
-            card.addView(heading, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
-
             TextView titleView = new TextView(this);
             titleView.setText(bookmark.title);
-            titleView.setTextSize(16);
+            titleView.setTextSize(15);
             titleView.setTextColor(Color.rgb(32, 37, 46));
             titleView.setTypeface(null, android.graphics.Typeface.BOLD);
-            titleView.setMaxLines(3);
-            card.addView(titleView, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
-
+            titleView.setSingleLine(true);
+            labels.addView(titleView);
             TextView urlView = new TextView(this);
-            urlView.setText(displayUrl(bookmark.url));
+            urlView.setText(bookmark.url);
             urlView.setTextSize(11);
             urlView.setTextColor(Color.rgb(100, 106, 116));
             urlView.setSingleLine(true);
-            card.addView(urlView, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
-
-            GridLayout.LayoutParams cardParams = new GridLayout.LayoutParams();
-            cardParams.width = cardWidth;
-            cardParams.height = dp(190);
-            cardParams.setMargins(dp(6), dp(7), dp(6), dp(7));
-            grid.addView(card, cardParams);
+            labels.addView(urlView);
+            row.addView(labels, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.MATCH_PARENT, 1));
+            TextView edit = toolbarButton("编辑", "编辑收藏 " + bookmark.title);
+            edit.setTextSize(12);
+            edit.setOnClickListener(view -> showEditBookmarkDialog(bookmark));
+            row.addView(edit, new LinearLayout.LayoutParams(dp(50), dp(52)));
+            TextView remove = toolbarButton("删除", "删除收藏 " + bookmark.title);
+            remove.setTextSize(12);
+            remove.setOnClickListener(view -> confirmRemoveBookmark(bookmark));
+            row.addView(remove, new LinearLayout.LayoutParams(dp(50), dp(52)));
+            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(78));
+            rowParams.setMargins(0, dp(3), 0, dp(3));
+            list.addView(row, rowParams);
         }
-        body.addView(grid);
+        body.addView(list);
         return page;
+    }
+
+    private void showDownloadOverview() {
+        if (activeWorkspace == null) return;
+        refreshDownloadStates();
+        downloadOverviewVisible = true;
+        bookmarkOverviewVisible = false;
+        workspaceBookmarkOverviewVisible = false;
+        workspaceOverviewVisible = false;
+        childOverviewVisible = false;
+        setBrowserContentVisible(false);
+        overviewContainer.removeAllViews();
+        overviewContainer.addView(createDownloadOverviewPage(), matchMatch());
+        overviewContainer.setVisibility(View.VISIBLE);
+        root.removeCallbacks(downloadRefreshRunnable);
+        boolean active = false;
+        for (ReBrowserDownloads.Record record : downloads) {
+            if (ReBrowserDownloads.STATUS_DOWNLOADING.equals(record.status)) {
+                active = true;
+                break;
+            }
+        }
+        if (active) root.postDelayed(downloadRefreshRunnable, 1_000L);
+    }
+
+    private View createDownloadOverviewPage() {
+        int pending = pendingDownloadCount(null);
+        String subtitle = downloadStore.downloadsEnabled()
+                ? pending == 0 ? downloads.size() + " 条记录"
+                        : pending + " 个待确认 · " + downloads.size() + " 条记录"
+                : "管理员已暂停新下载 · " + downloads.size() + " 条记录";
+        LinearLayout page = overviewPage("下载内容", subtitle,
+                null, this::hideOverview, "返回网页");
+        LinearLayout body = (LinearLayout) ((ScrollView) page.getChildAt(1)).getChildAt(0);
+        if (downloads.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("还没有下载记录\n\n网站发起下载时会先在这里记录；文件永不自动打开。");
+            empty.setTextSize(16);
+            empty.setTextColor(Color.rgb(92, 98, 108));
+            empty.setGravity(Gravity.CENTER);
+            empty.setPadding(dp(24), dp(96), dp(24), dp(48));
+            body.addView(empty);
+            return page;
+        }
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(8), dp(8), dp(8), dp(28));
+        for (ReBrowserDownloads.Record record : new ArrayList<>(downloads)) {
+            list.addView(createDownloadRow(record), new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(82)));
+        }
+        body.addView(list);
+        return page;
+    }
+
+    private View createDownloadRow(ReBrowserDownloads.Record record) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(7), dp(8), dp(7));
+        GradientDrawable background = roundedBackground(
+                ReBrowserDownloads.STATUS_PENDING.equals(record.status)
+                        ? Color.rgb(255, 248, 230) : Color.WHITE, dp(10));
+        row.setBackground(background);
+        LinearLayout labels = new LinearLayout(this);
+        labels.setOrientation(LinearLayout.VERTICAL);
+        labels.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title = new TextView(this);
+        title.setText(record.fileName);
+        title.setTextSize(15);
+        title.setTextColor(Color.rgb(32, 37, 46));
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        title.setSingleLine(true);
+        labels.addView(title);
+        TextView status = new TextView(this);
+        long size = record.totalSize >= 0 ? record.totalSize : record.declaredSize;
+        String progress = ReBrowserDownloads.STATUS_DOWNLOADING.equals(record.status)
+                ? " · " + ReBrowserDownloads.formatBytes(record.downloadedBytes)
+                        + " / " + ReBrowserDownloads.formatBytes(size)
+                : " · " + ReBrowserDownloads.formatBytes(size);
+        status.setText(ReBrowserDownloads.statusLabel(record) + progress
+                + " · " + displayUrl(record.sourceOrigin));
+        status.setTextSize(11);
+        status.setTextColor(record.dangerous
+                ? Color.rgb(174, 68, 45) : Color.rgb(92, 98, 108));
+        status.setSingleLine(true);
+        labels.addView(status);
+        row.addView(labels, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.MATCH_PARENT, 1));
+        TextView action = toolbarButton(downloadActionLabel(record),
+                "管理下载 " + record.fileName);
+        action.setTextSize(14);
+        action.setTextColor(Color.rgb(72, 56, 145));
+        action.setOnClickListener(view -> handleDownloadAction(record));
+        row.addView(action, new LinearLayout.LayoutParams(dp(58), dp(52)));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(82));
+        params.setMargins(0, dp(3), 0, dp(3));
+        row.setLayoutParams(params);
+        return row;
+    }
+
+    private String downloadActionLabel(ReBrowserDownloads.Record record) {
+        if (ReBrowserDownloads.STATUS_PENDING.equals(record.status)) return "确认";
+        if (ReBrowserDownloads.STATUS_DOWNLOADING.equals(record.status)) return "取消";
+        if (ReBrowserDownloads.STATUS_COMPLETED.equals(record.status)) return "打开";
+        if (ReBrowserDownloads.STATUS_FAILED.equals(record.status)
+                || ReBrowserDownloads.STATUS_CANCELLED.equals(record.status)) return "重试";
+        return "删除";
+    }
+
+    private void handleDownloadAction(ReBrowserDownloads.Record record) {
+        if (ReBrowserDownloads.STATUS_PENDING.equals(record.status)) {
+            showDownloadConfirmation(record, false);
+        } else if (ReBrowserDownloads.STATUS_DOWNLOADING.equals(record.status)) {
+            new AlertDialog.Builder(this).setTitle("取消下载？")
+                    .setMessage(record.fileName)
+                    .setPositiveButton("取消下载", (dialog, which) -> {
+                        cancelDownload(record);
+                        showDownloadOverview();
+                    }).setNegativeButton("继续", null).show();
+        } else if (ReBrowserDownloads.STATUS_COMPLETED.equals(record.status)) {
+            confirmOpenDownload(record);
+        } else if (ReBrowserDownloads.STATUS_FAILED.equals(record.status)
+                || ReBrowserDownloads.STATUS_CANCELLED.equals(record.status)) {
+            retryDownload(record);
+        } else {
+            deleteDownloadRecord(record);
+        }
+    }
+
+    private void retryDownload(ReBrowserDownloads.Record record) {
+        if (!downloadStore.downloadsEnabled()) {
+            record.status = ReBrowserDownloads.STATUS_REJECTED;
+            record.error = "administrator-policy-disabled";
+            record.updatedAt = System.currentTimeMillis();
+            downloadStore.save(downloads);
+            showDownloadOverview();
+            toast("管理员已暂停 ReBrowser 新下载");
+            return;
+        }
+        if (!record.exactRequestAvailable) {
+            record.status = ReBrowserDownloads.STATUS_EXPIRED;
+            record.error = "exact-request-not-retained-after-restart";
+            record.updatedAt = System.currentTimeMillis();
+            downloadStore.save(downloads);
+            showDownloadOverview();
+            toast("为避免持久化网址令牌，请在原网页重新发起下载");
+            return;
+        }
+        int count = downloadStore.recordAttempt(
+                record.profileName + "|" + record.sourceOrigin, System.currentTimeMillis());
+        record.rateCount = count;
+        record.highFrequency = count >= 3;
+        record.systemId = -1L;
+        record.status = ReBrowserDownloads.STATUS_PENDING;
+        record.error = "";
+        record.updatedAt = System.currentTimeMillis();
+        downloadStore.save(downloads);
+        showDownloadOverview();
+        toast("重试请求已进入待确认列表");
+    }
+
+    private void cancelDownload(ReBrowserDownloads.Record record) {
+        if (activeBlobTransfer != null && activeBlobTransfer.record == record) {
+            failBlobTransfer(activeBlobTransfer, "download-cancelled");
+        }
+        downloadStore.cancel(record);
+        downloadStore.save(downloads);
+    }
+
+    private void confirmOpenDownload(ReBrowserDownloads.Record record) {
+        String message = "文件将以只读临时授权交给 Android 系统选择器。ReBrowser 不会解析或执行它。";
+        if (record.dangerous) message += "\n\n⚠ 此文件被标记为高风险，请谨慎选择外部应用。";
+        new AlertDialog.Builder(this)
+                .setTitle("交给其他应用打开？")
+                .setMessage(message + "\n\n" + record.fileName)
+                .setPositiveButton("选择应用", (dialog, which) -> openDownloadExternally(record))
+                .setNeutralButton("删除", (dialog, which) -> confirmDeleteDownload(record))
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void openDownloadExternally(ReBrowserDownloads.Record record) {
+        Intent open = downloadStore.externalOpenIntent(record);
+        if (open == null) {
+            toast("下载文件已不存在");
+            return;
+        }
+        try {
+            startActivity(Intent.createChooser(open, "选择打开文件的应用"));
+        } catch (ActivityNotFoundException error) {
+            toast("没有能够打开此文件的应用");
+        }
+    }
+
+    private void confirmDeleteDownload(ReBrowserDownloads.Record record) {
+        new AlertDialog.Builder(this).setTitle("删除下载文件和记录？")
+                .setMessage(record.fileName)
+                .setPositiveButton("删除", (dialog, which) -> deleteDownloadRecord(record))
+                .setNegativeButton("取消", null).show();
+    }
+
+    private void deleteDownloadRecord(ReBrowserDownloads.Record record) {
+        if (activeBlobTransfer != null && activeBlobTransfer.record == record) {
+            failBlobTransfer(activeBlobTransfer, "download-deleted");
+        }
+        downloadStore.delete(record);
+        downloads.remove(record);
+        downloadStore.save(downloads);
+        if (downloadOverviewVisible) showDownloadOverview();
     }
 
     private void showWorkspaceBookmarkOverview() {
@@ -2116,6 +2565,7 @@ public final class ReBrowserActivity extends Activity {
         bookmarkOverviewVisible = false;
         workspaceOverviewVisible = false;
         childOverviewVisible = false;
+        downloadOverviewVisible = false;
         setBrowserContentVisible(false);
         overviewContainer.removeAllViews();
         overviewContainer.addView(createWorkspaceBookmarkOverviewPage(), matchMatch());
@@ -2277,6 +2727,7 @@ public final class ReBrowserActivity extends Activity {
         childOverviewVisible = false;
         bookmarkOverviewVisible = false;
         workspaceBookmarkOverviewVisible = false;
+        downloadOverviewVisible = false;
         workspaceSelectionMode = false;
         childSelectionMode = false;
         selectedWorkspaceIds.clear();
@@ -2369,7 +2820,8 @@ public final class ReBrowserActivity extends Activity {
             else hideOverview();
             return;
         }
-        if (bookmarkOverviewVisible || workspaceBookmarkOverviewVisible) {
+        if (bookmarkOverviewVisible || workspaceBookmarkOverviewVisible
+                || downloadOverviewVisible) {
             hideOverview();
             return;
         }
@@ -2425,6 +2877,8 @@ public final class ReBrowserActivity extends Activity {
     protected void onResume() {
         super.onResume();
         for (WebView webView : tabWebViews.values()) applyBrowserPreferences(webView);
+        refreshDownloadStates();
+        if (downloadOverviewVisible) showDownloadOverview();
         if (webContainer.getChildCount() > 0
                 && webContainer.getChildAt(0) instanceof WebView) {
             ((WebView) webContainer.getChildAt(0)).onResume();
@@ -2464,6 +2918,28 @@ public final class ReBrowserActivity extends Activity {
         Uri[] result = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
         pendingFileChooser.onReceiveValue(result);
         pendingFileChooser = null;
+    }
+
+    private void confirmExternalNavigation(Uri uri, String scheme) {
+        String action = "tel".equals(scheme) ? "拨号"
+                : "mailto".equals(scheme) ? "邮件"
+                : "sms".equals(scheme) ? "短信" : "地图";
+        String display = uri.toString();
+        if (display.length() > 300) display = display.substring(0, 300) + "…";
+        new AlertDialog.Builder(this)
+                .setTitle("打开外部" + action + "应用？")
+                .setMessage(display)
+                .setPositiveButton("选择应用", (dialog, which) -> {
+                    try {
+                        Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+                        intent.setSelector(null);
+                        startActivity(Intent.createChooser(intent, "选择外部应用"));
+                    } catch (ActivityNotFoundException error) {
+                        toast("没有能够处理此链接的应用");
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     private final class WorkspaceWebViewClient extends WebViewClient {
@@ -2520,13 +2996,19 @@ public final class ReBrowserActivity extends Activity {
         @Override
         public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
             Uri uri = request.getUrl();
-            String scheme = uri.getScheme();
-            if ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) return false;
-            try {
-                startActivity(new Intent(Intent.ACTION_VIEW, uri));
-            } catch (ActivityNotFoundException error) {
-                toast("没有能够打开此链接的应用");
+            String scheme = uri.getScheme() == null ? "" : request.getUrl().getScheme()
+                    .toLowerCase(java.util.Locale.ROOT);
+            if ("http".equals(scheme) || "https".equals(scheme)) return false;
+            if (!request.isForMainFrame() || !request.hasGesture()) {
+                toast("已阻止网页自动唤起外部应用");
+                return true;
             }
+            if (!("mailto".equals(scheme) || "tel".equals(scheme)
+                    || "sms".equals(scheme) || "geo".equals(scheme))) {
+                toast("已阻止不受支持的外部链接协议");
+                return true;
+            }
+            confirmExternalNavigation(uri, scheme);
             return true;
         }
 
@@ -2632,7 +3114,15 @@ public final class ReBrowserActivity extends Activity {
         }
     }
 
-    private final class ExternalDownloadListener implements DownloadListener {
+    private final class WorkspaceDownloadListener implements DownloadListener {
+        private final WebView sourceView;
+        private final String profileName;
+
+        WorkspaceDownloadListener(WebView sourceView, String profileName) {
+            this.sourceView = sourceView;
+            this.profileName = profileName;
+        }
+
         @Override
         public void onDownloadStart(
                 String url,
@@ -2641,7 +3131,543 @@ public final class ReBrowserActivity extends Activity {
                 String mimeType,
                 long contentLength
         ) {
-            toast("尚未实现内置下载管理器");
+            requestDownload(sourceView, profileName, url, userAgent,
+                    contentDisposition, mimeType, contentLength);
+        }
+    }
+
+    private void requestDownload(
+            WebView sourceView,
+            String profileName,
+            String url,
+            String userAgent,
+            String contentDisposition,
+            String mimeType,
+            long contentLength
+    ) {
+        ReBrowserStore.Tab tab = webViewTabs.get(sourceView);
+        if (tab == null || activeWorkspace == null || !activeWorkspace.tabs.contains(tab)
+                || !activeWorkspace.profileName.equals(profileName)
+                || !ReBrowserStore.isOwnedProfile(profileName)) {
+            toast("已拒绝来源不明确的下载");
+            return;
+        }
+        String sourceUrl = sourceView.getUrl() == null ? tab.url : sourceView.getUrl();
+        String origin = safeOrigin(sourceUrl);
+        if (origin.isBlank()) {
+            toast("已拒绝没有顶层网站来源的下载");
+            return;
+        }
+        String kind = ReBrowserDownloads.kind(url);
+        if (ReBrowserDownloads.KIND_HTTP.equals(kind)) {
+            String scheme = Uri.parse(url).getScheme();
+            if (!("https".equalsIgnoreCase(scheme) || "http".equalsIgnoreCase(scheme))) {
+                toast("仅允许 HTTP(S)、Blob 或 Data 下载");
+                return;
+            }
+        } else if (ReBrowserDownloads.KIND_BLOB.equals(kind)
+                && !url.startsWith("blob:" + origin + "/")) {
+            toast("Blob 下载来源与当前顶层网站不一致");
+            return;
+        }
+        String siteKey = profileName + "|" + origin;
+        int rateCount = downloadStore.recordAttempt(siteKey, System.currentTimeMillis());
+        boolean highFrequency = rateCount >= 3;
+        ReBrowserDownloads.Record record = downloadStore.create(
+                activeWorkspace.id, tab.id, profileName, sourceUrl, origin, url,
+                userAgent, contentDisposition, mimeType, contentLength,
+                rateCount, highFrequency);
+        if (!makeDownloadRecordRoom()) {
+            toast("下载记录与活动任务已达到上限");
+            return;
+        }
+        downloads.add(0, record);
+        if (!downloadStore.downloadsEnabled()) {
+            record.status = ReBrowserDownloads.STATUS_REJECTED;
+            record.error = "administrator-policy-disabled";
+            record.updatedAt = System.currentTimeMillis();
+            downloadStore.save(downloads);
+            toast("管理员已暂停 ReBrowser 新下载");
+            return;
+        }
+        if (highFrequency) {
+            int global = pendingDownloadCount(null);
+            int perSite = pendingDownloadCount(siteKey);
+            if (global > MAX_PENDING_DOWNLOADS || perSite > MAX_PENDING_DOWNLOADS_PER_SITE) {
+                record.status = ReBrowserDownloads.STATUS_REJECTED;
+                record.error = "pending-queue-limit";
+                toast("该网站的高频下载请求过多，已拒绝");
+            } else {
+                toast("高频下载已拦截，请在“下载内容”中确认");
+            }
+            downloadStore.save(downloads);
+            return;
+        }
+        downloadStore.save(downloads);
+        showDownloadConfirmation(record, false);
+    }
+
+    private int pendingDownloadCount(String siteKey) {
+        int count = 0;
+        for (ReBrowserDownloads.Record record : downloads) {
+            if (!ReBrowserDownloads.STATUS_PENDING.equals(record.status)) continue;
+            if (siteKey == null || siteKey.equals(record.profileName + "|" + record.sourceOrigin)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private void showDownloadConfirmation(
+            ReBrowserDownloads.Record record,
+            boolean dangerAcknowledged
+    ) {
+        if (!ReBrowserDownloads.STATUS_PENDING.equals(record.status)) return;
+        String warning = record.dangerous
+                ? "\n\n⚠ 该文件类型可能包含可执行代码、脚本、宏或主动内容。"
+                : "";
+        new AlertDialog.Builder(this)
+                .setTitle(record.highFrequency ? "确认高频下载？" : "下载文件？")
+                .setMessage(record.fileName + "\n"
+                        + ReBrowserDownloads.formatBytes(record.declaredSize)
+                        + "\n来源：" + record.sourceOrigin + warning)
+                .setPositiveButton("下载", (dialog, which) -> {
+                    if (record.dangerous && !dangerAcknowledged) {
+                        showDangerousDownloadConfirmation(record);
+                    } else {
+                        approveDownload(record);
+                    }
+                })
+                .setNegativeButton("拒绝", (dialog, which) -> rejectDownload(record))
+                .show();
+    }
+
+    private void showDangerousDownloadConfirmation(ReBrowserDownloads.Record record) {
+        new AlertDialog.Builder(this)
+                .setTitle("危险文件二次确认")
+                .setMessage("ReBrowser 只会保存文件，不会自动打开、安装、预览、解压或执行。"
+                        + "请仅在信任来源时继续。\n\n" + record.fileName)
+                .setPositiveButton("仍要下载", (dialog, which) -> approveDownload(record))
+                .setNegativeButton("拒绝", (dialog, which) -> rejectDownload(record))
+                .show();
+    }
+
+    private void approveDownload(ReBrowserDownloads.Record record) {
+        if (!ReBrowserDownloads.STATUS_PENDING.equals(record.status)) return;
+        if (!downloadStore.downloadsEnabled()) {
+            record.status = ReBrowserDownloads.STATUS_REJECTED;
+            record.error = "administrator-policy-disabled";
+            record.updatedAt = System.currentTimeMillis();
+            downloadStore.save(downloads);
+            toast("管理员已暂停 ReBrowser 新下载");
+            if (downloadOverviewVisible) showDownloadOverview();
+            return;
+        }
+        if (!record.exactRequestAvailable) {
+            record.status = ReBrowserDownloads.STATUS_EXPIRED;
+            record.error = "exact-request-not-retained-after-restart";
+            record.updatedAt = System.currentTimeMillis();
+            downloadStore.save(downloads);
+            toast("为避免持久化网址令牌，请回到原网页重新发起下载");
+            return;
+        }
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
+                && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                        != PackageManager.PERMISSION_GRANTED) {
+            awaitingStorageDownloadId = record.id;
+            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                    DOWNLOAD_STORAGE_REQUEST);
+            return;
+        }
+        if (ReBrowserDownloads.KIND_DATA.equals(record.kind)) {
+            record.status = ReBrowserDownloads.STATUS_DOWNLOADING;
+            record.updatedAt = System.currentTimeMillis();
+            customDownloadIds.add(record.id);
+            downloadStore.save(downloads);
+            downloadStore.importDataAsync(record, () -> runOnUiThread(() -> {
+                customDownloadIds.remove(record.id);
+                downloadStore.save(downloads);
+                if (downloadOverviewVisible) showDownloadOverview();
+                toast(ReBrowserDownloads.STATUS_COMPLETED.equals(record.status)
+                        ? "Data 文件已保存；不会自动打开" : "Data 下载失败");
+            }));
+            return;
+        }
+        if (ReBrowserDownloads.KIND_BLOB.equals(record.kind)) {
+            startBlobTransfer(record);
+            return;
+        }
+        try {
+            if (!ReBrowserStore.isOwnedProfile(record.profileName)) {
+                throw new SecurityException("non-ReBrowser-profile");
+            }
+            Profile profile = ProfileStore.getInstance().getProfile(record.profileName);
+            if (profile == null) throw new IllegalStateException("profile-unavailable");
+            String cookie = profile.getCookieManager().getCookie(record.url);
+            String referer = record.sourceOrigin.equals(safeOrigin(record.url))
+                    ? record.sourceUrl : record.sourceOrigin + "/";
+            downloadStore.enqueueHttp(record, cookie, referer);
+            downloadStore.save(downloads);
+            toast("已开始下载；不会自动打开文件");
+            if (downloadOverviewVisible) showDownloadOverview();
+        } catch (Exception error) {
+            record.status = ReBrowserDownloads.STATUS_FAILED;
+            record.error = error.getClass().getSimpleName() + ":" + error.getMessage();
+            record.updatedAt = System.currentTimeMillis();
+            downloadStore.save(downloads);
+            toast("无法开始下载");
+        }
+    }
+
+    private void startBlobTransfer(ReBrowserDownloads.Record record) {
+        if (activeBlobTransfer != null) {
+            record.status = ReBrowserDownloads.STATUS_FAILED;
+            record.error = "another-blob-transfer-active";
+            downloadStore.save(downloads);
+            toast("一次只能提取一个 Blob 文件");
+            return;
+        }
+        WebView webView = tabWebViews.get(record.tabId);
+        ReBrowserStore.Tab tab = webView == null ? null : webViewTabs.get(webView);
+        if (webView == null || tab == null
+                || !record.profileName.equals(activeWorkspace.profileName)
+                || !record.sourceOrigin.equals(safeOrigin(webView.getUrl()))) {
+            record.status = ReBrowserDownloads.STATUS_EXPIRED;
+            record.error = "blob-source-page-unavailable";
+            downloadStore.save(downloads);
+            toast("Blob 所属页面已离开，请在原网页重新发起下载");
+            return;
+        }
+        if (!webView.getSettings().getJavaScriptEnabled()) {
+            record.status = ReBrowserDownloads.STATUS_FAILED;
+            record.error = "javascript-disabled";
+            downloadStore.save(downloads);
+            toast("Blob 提取需要当前网页启用 JavaScript");
+            return;
+        }
+        try {
+            File directory = new File(getCacheDir(), "rebrowser-downloads");
+            if (!directory.exists() && !directory.mkdirs()) {
+                throw new IllegalStateException("temporary-directory-unavailable");
+            }
+            BlobTransfer transfer = new BlobTransfer(record, webView,
+                    new File(directory, record.id + ".part"));
+            activeBlobTransfer = transfer;
+            customDownloadIds.add(record.id);
+            record.status = ReBrowserDownloads.STATUS_DOWNLOADING;
+            record.updatedAt = System.currentTimeMillis();
+            downloadStore.save(downloads);
+            String key = JSONObject.quote(transfer.key);
+            String script = "(()=>{const s={status:'loading',blob:null,error:''};window["
+                    + key + "]=s;fetch(" + JSONObject.quote(record.url)
+                    + ").then(r=>r.blob()).then(b=>{s.blob=b;s.size=b.size;s.type=b.type||'';"
+                    + "s.status='ready';}).catch(e=>{s.error=String(e).slice(0,160);"
+                    + "s.status='error';});return true;})()";
+            transfer.phaseDeadline = SystemClock.elapsedRealtime() + 30_000L;
+            webView.evaluateJavascript(script, ignored -> pollBlobMetadata(transfer));
+        } catch (Exception error) {
+            failBlobTransfer(activeBlobTransfer, "blob-initialization-failed");
+        }
+    }
+
+    private void pollBlobMetadata(BlobTransfer transfer) {
+        if (transfer != activeBlobTransfer) return;
+        String key = JSONObject.quote(transfer.key);
+        String script = "(()=>{const s=window[" + key + "];if(!s)return JSON.stringify("
+                + "{status:'error',error:'missing-blob-state'});return JSON.stringify("
+                + "{status:s.status,error:s.error||'',size:s.size||0,type:s.type||''});})()";
+        transfer.webView.evaluateJavascript(script,
+                result -> handleBlobMetadataPoll(transfer, result));
+    }
+
+    private void handleBlobMetadataPoll(BlobTransfer transfer, String result) {
+        if (transfer != activeBlobTransfer) return;
+        try {
+            JSONObject metadata = new JSONObject(decodeJavascriptResult(result));
+            String status = metadata.optString("status");
+            if ("loading".equals(status)) {
+                if (SystemClock.elapsedRealtime() >= transfer.phaseDeadline) {
+                    throw new IllegalStateException("blob-fetch-timeout");
+                }
+                root.postDelayed(() -> pollBlobMetadata(transfer), 50L);
+                return;
+            }
+            if (!"ready".equals(status)) {
+                throw new IllegalStateException(metadata.optString("error", "blob-fetch-failed"));
+            }
+            long size = metadata.getLong("size");
+            if (size < 0 || size > ReBrowserDownloads.MAX_BLOB_BYTES) {
+                throw new IllegalArgumentException("blob-size-limit");
+            }
+            if (size > new StatFs(transfer.temporary.getParent()).getAvailableBytes()) {
+                throw new IllegalStateException("insufficient-storage");
+            }
+            transfer.expectedSize = size;
+            transfer.record.totalSize = size;
+            String type = metadata.optString("type", "");
+            if (!type.isBlank()) transfer.record.mimeType = type;
+            transfer.record.dangerous = ReBrowserDownloads.isDangerous(
+                    transfer.record.fileName, transfer.record.mimeType);
+            requestNextBlobChunk(transfer);
+        } catch (Exception error) {
+            failBlobTransfer(transfer, "blob-metadata-invalid:" + error.getMessage());
+        }
+    }
+
+    private void requestNextBlobChunk(BlobTransfer transfer) {
+        if (transfer != activeBlobTransfer) return;
+        if (transfer.offset >= transfer.expectedSize) {
+            finishBlobTransfer(transfer);
+            return;
+        }
+        if (!transfer.record.sourceOrigin.equals(safeOrigin(transfer.webView.getUrl()))) {
+            failBlobTransfer(transfer, "blob-source-page-changed");
+            return;
+        }
+        long end = Math.min(transfer.expectedSize, transfer.offset + 128 * 1024L);
+        String key = JSONObject.quote(transfer.key);
+        String script = "(()=>{const s=window[" + key + "];if(!s||!s.blob)return false;"
+                + "s.chunkStatus='loading';s.chunk='';s.chunkError='';s.blob.slice("
+                + transfer.offset + "," + end + ").arrayBuffer().then(v=>{const a=new Uint8Array(v);"
+                + "let x='';for(let i=0;i<a.length;i+=32768)x+=String.fromCharCode.apply("
+                + "null,a.subarray(i,i+32768));s.chunk=btoa(x);s.chunkStatus='ready';})"
+                + ".catch(e=>{s.chunkError=String(e).slice(0,160);s.chunkStatus='error';});"
+                + "return true;})()";
+        transfer.phaseDeadline = SystemClock.elapsedRealtime() + 30_000L;
+        transfer.webView.evaluateJavascript(script, ignored -> pollBlobChunk(transfer));
+    }
+
+    private void pollBlobChunk(BlobTransfer transfer) {
+        if (transfer != activeBlobTransfer) return;
+        String key = JSONObject.quote(transfer.key);
+        String script = "(()=>{const s=window[" + key + "];if(!s)return JSON.stringify("
+                + "{status:'error',error:'missing-blob-state'});return JSON.stringify("
+                + "{status:s.chunkStatus||'loading',error:s.chunkError||'',data:s.chunk||''});})()";
+        transfer.webView.evaluateJavascript(script, result -> handleBlobChunkPoll(transfer, result));
+    }
+
+    private void handleBlobChunkPoll(BlobTransfer transfer, String result) {
+        if (transfer != activeBlobTransfer) return;
+        try {
+            JSONObject chunkResult = new JSONObject(decodeJavascriptResult(result));
+            String status = chunkResult.optString("status");
+            if ("loading".equals(status)) {
+                if (SystemClock.elapsedRealtime() >= transfer.phaseDeadline) {
+                    throw new IllegalStateException("blob-chunk-timeout");
+                }
+                root.postDelayed(() -> pollBlobChunk(transfer), 50L);
+                return;
+            }
+            if (!"ready".equals(status)) {
+                throw new IllegalStateException(chunkResult.optString(
+                        "error", "blob-chunk-failed"));
+            }
+            String encoded = chunkResult.optString("data");
+            if (encoded.isBlank()) throw new IllegalStateException("empty-blob-chunk");
+            byte[] chunk = Base64.decode(encoded, Base64.DEFAULT);
+            long remaining = transfer.expectedSize - transfer.offset;
+            if (chunk.length <= 0 || chunk.length > remaining || chunk.length > 128 * 1024) {
+                throw new IllegalStateException("invalid-blob-chunk-size");
+            }
+            transfer.output.write(chunk);
+            transfer.digest.update(chunk);
+            transfer.offset += chunk.length;
+            transfer.record.downloadedBytes = transfer.offset;
+            transfer.record.updatedAt = System.currentTimeMillis();
+            if (transfer.offset % (1024 * 1024L) < chunk.length) {
+                downloadStore.save(downloads);
+            }
+            requestNextBlobChunk(transfer);
+        } catch (Exception error) {
+            failBlobTransfer(transfer, "blob-chunk-failed:" + error.getMessage());
+        }
+    }
+
+    private void finishBlobTransfer(BlobTransfer transfer) {
+        if (transfer != activeBlobTransfer) return;
+        try {
+            transfer.output.close();
+            transfer.output = null;
+            if (transfer.temporary.length() != transfer.expectedSize) {
+                throw new IllegalStateException("blob-size-mismatch");
+            }
+            String digest = hexDigest(transfer.digest.digest());
+            cleanupBlobJavascript(transfer);
+            activeBlobTransfer = null;
+            downloadStore.publishTemporaryFileAsync(
+                    transfer.record, transfer.temporary, digest,
+                    () -> runOnUiThread(() -> {
+                        customDownloadIds.remove(transfer.record.id);
+                        downloadStore.save(downloads);
+                        if (downloadOverviewVisible) showDownloadOverview();
+                        toast(ReBrowserDownloads.STATUS_COMPLETED.equals(transfer.record.status)
+                                ? "Blob 文件已保存；不会自动打开" : "Blob 文件保存失败");
+                    }));
+        } catch (Exception error) {
+            failBlobTransfer(transfer, "blob-finalization-failed:" + error.getMessage());
+        }
+    }
+
+    private void failBlobTransfer(BlobTransfer transfer, String reason) {
+        if (transfer == null) return;
+        try {
+            if (transfer.output != null) transfer.output.close();
+        } catch (Exception ignored) {
+            // Failure path continues with deletion.
+        }
+        transfer.temporary.delete();
+        cleanupBlobJavascript(transfer);
+        customDownloadIds.remove(transfer.record.id);
+        transfer.record.status = ReBrowserDownloads.STATUS_FAILED;
+        transfer.record.error = reason == null ? "blob-transfer-failed"
+                : reason.substring(0, Math.min(300, reason.length()));
+        transfer.record.updatedAt = System.currentTimeMillis();
+        if (activeBlobTransfer == transfer) activeBlobTransfer = null;
+        downloadStore.save(downloads);
+        if (downloadOverviewVisible) showDownloadOverview();
+    }
+
+    private void cleanupBlobJavascript(BlobTransfer transfer) {
+        try {
+            transfer.webView.evaluateJavascript(
+                    "(()=>{try{delete window[" + JSONObject.quote(transfer.key)
+                            + "];return true;}catch(e){return false;}})()", null);
+        } catch (RuntimeException ignored) {
+            // The source WebView may already have been destroyed.
+        }
+    }
+
+    private static String decodeJavascriptResult(String result) throws Exception {
+        Object decoded = new JSONTokener(result == null ? "null" : result).nextValue();
+        if (!(decoded instanceof String)) throw new IllegalStateException("javascript-no-result");
+        return (String) decoded;
+    }
+
+    private static String hexDigest(byte[] value) {
+        StringBuilder output = new StringBuilder(value.length * 2);
+        for (byte item : value) output.append(String.format(java.util.Locale.ROOT, "%02x", item));
+        return output.toString();
+    }
+
+    private void rejectDownload(ReBrowserDownloads.Record record) {
+        if (!ReBrowserDownloads.STATUS_PENDING.equals(record.status)) return;
+        record.status = ReBrowserDownloads.STATUS_REJECTED;
+        record.updatedAt = System.currentTimeMillis();
+        downloadStore.save(downloads);
+        if (downloadOverviewVisible) showDownloadOverview();
+    }
+
+    private void refreshDownloadStates() {
+        if (downloadStore == null) return;
+        boolean changed = false;
+        for (ReBrowserDownloads.Record record : downloads) {
+            if (ReBrowserDownloads.STATUS_PENDING.equals(record.status)
+                    && !record.exactRequestAvailable) {
+                record.status = ReBrowserDownloads.STATUS_EXPIRED;
+                record.error = "exact-request-not-retained-after-restart";
+                record.updatedAt = System.currentTimeMillis();
+                changed = true;
+            }
+            if (ReBrowserDownloads.STATUS_DOWNLOADING.equals(record.status)) {
+                if (record.systemId < 0 && !customDownloadIds.contains(record.id)) {
+                    record.status = ReBrowserDownloads.STATUS_FAILED;
+                    record.error = "custom-download-interrupted";
+                    record.updatedAt = System.currentTimeMillis();
+                    changed = true;
+                } else {
+                    changed |= downloadStore.refresh(record);
+                }
+            }
+            if (ReBrowserDownloads.STATUS_COMPLETED.equals(record.status)
+                    && !record.hashAttempted
+                    && (record.sha256 == null || record.sha256.isBlank())
+                    && hashingDownloadIds.add(record.id)) {
+                downloadStore.computeSha256Async(record, () -> runOnUiThread(() -> {
+                    hashingDownloadIds.remove(record.id);
+                    downloadStore.save(downloads);
+                    if (downloadOverviewVisible) showDownloadOverview();
+                }));
+            }
+        }
+        if (changed) downloadStore.save(downloads);
+    }
+
+    private boolean makeDownloadRecordRoom() {
+        while (downloads.size() >= ReBrowserDownloads.MAX_RECORDS) {
+            int removable = findOldestRemovableDownload();
+            if (removable < 0) return false;
+            downloads.remove(removable);
+        }
+        return true;
+    }
+
+    private void trimDownloadHistory() {
+        while (downloads.size() > ReBrowserDownloads.MAX_RECORDS) {
+            int removable = findOldestRemovableDownload();
+            if (removable < 0) return;
+            downloads.remove(removable);
+        }
+    }
+
+    private int findOldestRemovableDownload() {
+        for (int index = downloads.size() - 1; index >= 0; index--) {
+            ReBrowserDownloads.Record record = downloads.get(index);
+            if (!ReBrowserDownloads.STATUS_DOWNLOADING.equals(record.status)
+                    && !ReBrowserDownloads.STATUS_PENDING.equals(record.status)) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private static final class BlobTransfer {
+        final ReBrowserDownloads.Record record;
+        final WebView webView;
+        final String key;
+        final File temporary;
+        FileOutputStream output;
+        MessageDigest digest;
+        long expectedSize;
+        long offset;
+        long phaseDeadline;
+
+        BlobTransfer(ReBrowserDownloads.Record record, WebView webView, File temporary)
+                throws Exception {
+            this.record = record;
+            this.webView = webView;
+            this.key = "__rebrowser_download_" + record.id;
+            this.temporary = temporary;
+            output = new FileOutputStream(temporary);
+            digest = MessageDigest.getInstance("SHA-256");
+        }
+    }
+
+    private ReBrowserDownloads.Record findDownload(String id) {
+        for (ReBrowserDownloads.Record record : downloads) {
+            if (record.id.equals(id)) return record;
+        }
+        return null;
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode,
+            String[] permissions,
+            int[] grantResults
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != DOWNLOAD_STORAGE_REQUEST) return;
+        ReBrowserDownloads.Record record = findDownload(awaitingStorageDownloadId);
+        awaitingStorageDownloadId = null;
+        if (record == null) return;
+        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            approveDownload(record);
+        } else {
+            record.status = ReBrowserDownloads.STATUS_FAILED;
+            record.error = "storage-permission-denied";
+            record.updatedAt = System.currentTimeMillis();
+            downloadStore.save(downloads);
+            toast("没有存储权限，无法下载");
         }
     }
 

@@ -33,7 +33,9 @@ ReBrowser 的核心原则是 **Persist by intent, not by visitation（由意图�
 - 新总标签页默认是关闭即清理的临时环境；
 - 用户主动上锁后成为副总标签页，完整环境进入书签栏并可收起、恢复；
 - 再次明确提升后成为不可关闭、启动时恢复的主总标签页；
-- 收藏夹保存标题和网址，书签栏保存完整副总标签页环境；
+- 收藏夹以单行网址列表保存标题和网址，书签栏保存完整副总标签页环境；
+- ReBrowser 独占的下载管理支持命名 Profile 登录态、进度、取消、重试、删除、SHA-256，以及受限 Blob/Data 重建；
+- 同一“Profile＋顶层 origin”五分钟内第三次下载起进入有界待确认队列，危险类型在保存和外部打开前警告；
 - 最多同时存在 5 个主总标签页、64 个总标签页，每个总标签页最多 50 个子标签页；
 - 支持网页新窗口转为当前环境内的子标签页、原生全屏视频、持久化全局方向及独立的视频方向策略；
 - 不支持 WebView `MULTI_PROFILE` 时完全禁用，不回退到 ReOutlook 的 Default Profile。
@@ -47,7 +49,7 @@ ReBrowser 的核心原则是 **Persist by intent, not by visitation（由意图�
 - **ReOutlook 维护**：邮件导出必须同时通过离线管理员签名和机主系统锁屏确认，导出文件使用 AES-256-GCM 与 RSA-OAEP 加密。
 - **ReBrowser 控制**：版本化协议支持按总标签页／子标签页 ID 执行导航、生命周期、设置、诊断、审计和有界修复；永久管理员根可独立授权全部三级操作，机主锁屏单独授权仅限一、二级。
 
-两种接口都不提供任意 JavaScript、Cookie、Token、Web Storage 或密码提取能力。参见 [管理员工具](tools/admin/README.md) 和 [ReBrowser 管理协议](docs/REBROWSER_ADMIN_CONTROL.md)。管理员私钥不包含在 APK 或公开仓库中。
+ReBrowser 管理协议还提供有界的下载策略、任务、批准、拒绝、取消、重试、删除、清理和修复命令，但不提供打开、安装或执行文件的命令。两种接口都不提供任意 JavaScript、Cookie、Token、Web Storage 或密码提取能力。参见 [管理员工具](tools/admin/README.md) 和 [ReBrowser 管理协议](docs/REBROWSER_ADMIN_CONTROL.md)。管理员私钥不包含在 APK 或公开仓库中。
 
 ## 下载与安装
 

@@ -103,6 +103,9 @@ public final class ReBrowserAdminActivity extends Activity {
         if (pendingRequest.has("tabId")) {
             target += "\n子标签页：" + pendingRequest.optString("tabId");
         }
+        if (pendingRequest.has("downloadId")) {
+            target += "\n下载任务：" + pendingRequest.optString("downloadId");
+        }
         status.setText("ADB 请求尚未获得管理员密钥签名。\n\n请求操作：" + operation
                 + "\n授权级别：" + level + target
                 + (level >= 2 ? "\n\n这是会改变或删除浏览器状态的操作。" : "")

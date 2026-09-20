@@ -59,13 +59,31 @@ OPERATIONS = {
     "close-workspace": "CLOSE_WORKSPACE",
     "close-tab": "CLOSE_TAB",
     "delete-shelved": "DELETE_SHELVED",
+    "show-downloads": "SHOW_DOWNLOADS",
+    "download-policy": "GET_DOWNLOAD_POLICY",
+    "set-downloads-enabled": "SET_DOWNLOAD_POLICY",
+    "downloads": "GET_DOWNLOADS",
+    "approve-download": "APPROVE_DOWNLOAD",
+    "reject-download": "REJECT_DOWNLOAD",
+    "cancel-download": "CANCEL_DOWNLOAD",
+    "retry-download": "RETRY_DOWNLOAD",
+    "delete-download": "DELETE_DOWNLOAD",
+    "clear-downloads": "CLEAR_DOWNLOADS",
+    "repair-downloads": "REPAIR_DOWNLOADS",
 }
 WORKSPACE_ARGUMENT = {
     "activate-workspace", "lock", "unlock", "promote", "demote", "shelve",
     "restore", "close-workspace", "delete-shelved",
 }
 TAB_ARGUMENT = {"activate-tab", "close-tab"}
-DESTRUCTIVE = {"close-workspace", "close-tab", "delete-shelved"}
+DOWNLOAD_ARGUMENT = {
+    "approve-download", "reject-download", "cancel-download", "retry-download",
+    "delete-download",
+}
+DESTRUCTIVE = {
+    "close-workspace", "close-tab", "delete-shelved", "delete-download",
+    "clear-downloads",
+}
 BOOLEAN_PREFERENCES = {
     "javascript", "thirdPartyCookies", "desktopMode", "forcePrimaryPromotion",
     "videoOrientationOverride",
@@ -142,6 +160,14 @@ def build_request(args: argparse.Namespace) -> dict:
         if not values:
             raise SystemExit(f"{args.command} requires a tab ID")
         request["tabId"] = values.pop(0)
+    if args.command in DOWNLOAD_ARGUMENT:
+        if not values:
+            raise SystemExit(f"{args.command} requires a download ID")
+        request["downloadId"] = values.pop(0)
+    if args.command == "set-downloads-enabled":
+        if not values:
+            raise SystemExit("set-downloads-enabled requires true or false")
+        request["downloadsEnabled"] = parse_bool(values.pop(0))
     if args.command == "set-pref":
         if len(values) < 2:
             raise SystemExit("set-pref requires NAME VALUE")

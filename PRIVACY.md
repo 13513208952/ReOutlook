@@ -8,6 +8,8 @@ ReOutlook 是一个本地优先的实验性 Outlook WebView 与离线阅读客�
 
 Outlook 登录 Cookie、Web Storage 和登录会话由 Android WebView 按网页客户端的正常方式管理。ReOutlook 的原生消息桥不会读取、导出或写入密码、Cookie、访问令牌或刷新令牌。ReBrowser 是同一应用内的浏览器形态；每个外层总标签页使用独立命名 Profile 保存网站状态，不与 ReOutlook 的 Default Profile 共用。用户主动加入收藏栏的网址会在应用私有目录中保存网页标题和完整网址。书签栏不保存普通网址，而是登记用户已上锁的副总标签页及其子标签页元数据；对应网站状态仍保存在该总标签页的命名 Profile 中。
 
+ReBrowser 下载历史在应用私有目录中保存净化后的文件名、来源 origin、仅保留 origin 的请求位置、任务状态、大小、风险分类和 SHA-256。实际文件由用户确认后保存到 Android 公共下载集合。登录态 HTTP(S) 下载只把实际命名 Profile 的 Cookie 用于该次系统下载请求；原始 Cookie、Cookie 摘要、Cookie 长度、完整带查询参数下载网址和网址令牌均不进入应用下载历史、管理员结果或审计。为此，应用重启后不能重试需要原始查询参数的旧请求，用户必须回到原网页重新发起。
+
 ## 网络通信
 
 应用本身没有 ReOutlook 开发者服务器、遥测、广告或分析服务。在线邮件、登录和学校 MFA 流程直接发生在 Outlook、Microsoft 和学校认证网页之间；ReBrowser 访问由用户选择的网站时，也由 WebView 直接连接该网站。
@@ -18,13 +20,13 @@ Outlook 登录 Cookie、Web Storage 和登录会话由 Android WebView 按网页
 
 ## 显式备份与管理员维护
 
-Android 自动备份保持关闭。管理员维护接口没有普通应用内入口，只允许 Android shell 调用。ReOutlook 邮件导出必须同时具备有效的一次性管理员签名和机主在前台完成的 Android 系统锁屏凭据确认。ReBrowser 的三级受限开发协议允许永久管理员根独立授权全部级别，机主锁屏单独授权只允许一、二级；状态及审计仅保存网页 origin，不提供 Cookie、令牌、Web Storage、任意 JavaScript 或邮件数据读取能力。
+Android 自动备份保持关闭。管理员维护接口没有普通应用内入口，只允许 Android shell 调用。ReOutlook 邮件导出必须同时具备有效的一次性管理员签名和机主在前台完成的 Android 系统锁屏凭据确认。ReBrowser 的三级受限开发协议允许永久管理员根独立授权全部级别，机主锁屏单独授权只允许一、二级；状态及审计仅保存网页 origin。管理员可以启停新下载、管理下载任务和查看仅保留请求 origin 的技术状态，但不能取得 Cookie、令牌、Web Storage，不能命令应用打开、安装或执行文件，也没有任意 JavaScript 或邮件数据读取能力。
 
 管理员导出文件采用 AES-256-GCM 加密，内容密钥由独立的管理员 RSA-3072 导出公钥包装。持有对应导出私钥的人可以解密已获机主授权的导出文件。导出中不包含密码、Cookie、访问令牌、刷新令牌或 Web Storage。
 
 ## 数据删除
 
-卸载应用会删除 Android 应用私有目录中的本地邮件缓存。用户主动保存到下载目录或其他位置的显式备份文件不随应用卸载删除，需要用户自行管理。
+卸载应用会删除 Android 应用私有目录中的本地邮件缓存。用户主动保存到下载目录的 ReBrowser 文件、或保存到其他位置的显式备份文件，不随应用卸载删除，需要用户自行管理。删除 ReBrowser 下载记录时，应用会同时请求 Android 删除其对应下载文件。
 
 ## 项目性质
 

@@ -53,8 +53,23 @@ python3 tools/admin/rebrowser_admin.py open https://www.baidu.com/ \
 ```
 
 Protocol v2 provides per-request structured results, object-ID targeting, bounded load waits,
-lifecycle control, diagnostics, audit metadata, settings, validation, and root-only repair. Commands
-that close or delete an object require `--confirm-delete`.
+lifecycle control, diagnostics, audit metadata, settings, validation, download-task control, and root-only repair. Commands that close or delete an object—or globally clear downloads—require `--confirm-delete`.
+
+Download examples:
+
+```bash
+python3 tools/admin/rebrowser_admin.py download-policy --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py downloads --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py set-downloads-enabled false --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py set-downloads-enabled true --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py approve-download DOWNLOAD_ID --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py cancel-download DOWNLOAD_ID --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py delete-download DOWNLOAD_ID \
+  --confirm-delete --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py repair-downloads --key-id rebrowser-root-v1
+```
+
+The administrator can disable new downloads (which rejects pending requests but does not corrupt already-running transfers), approve or manage files, but cannot command ReBrowser to open, install, preview, unpack, or execute one. Results reduce request URLs to origins and never contain raw Profile Cookie.
 
 The owner-authorized alternative does not require a private key, but the owner must confirm the
 exact level-one or level-two command on the phone. Level three rejects owner-only authorization:

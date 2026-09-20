@@ -162,16 +162,16 @@ final class ReBrowserStore {
         if (persistentCount >= MAX_WORKSPACES) return false;
         workspace.level = Level.SECONDARY;
         workspace.title = cleanTitle(workspace.title, "副总标签页");
-        unmarkProfileForDeletion(workspace.profileName);
-        save(allWorkspaces);
+        commitWorkspaceProfileState(
+                WORKSPACES, allWorkspaces, false, workspace.profileName, false);
         return true;
     }
 
     boolean unlockToTemporary(Workspace workspace, List<Workspace> allWorkspaces) {
         if (workspace.level != Level.SECONDARY) return false;
         workspace.level = Level.TEMPORARY;
-        markProfileForDeletion(workspace.profileName);
-        save(allWorkspaces);
+        commitWorkspaceProfileState(
+                WORKSPACES, allWorkspaces, false, workspace.profileName, true);
         return true;
     }
 
@@ -184,24 +184,24 @@ final class ReBrowserStore {
                 && !(allowTemporary && workspace.level == Level.TEMPORARY)) return false;
         if (!canPromoteToPrimary(allWorkspaces)) return false;
         workspace.level = Level.PRIMARY;
-        unmarkProfileForDeletion(workspace.profileName);
-        save(allWorkspaces);
+        commitWorkspaceProfileState(
+                WORKSPACES, allWorkspaces, false, workspace.profileName, false);
         return true;
     }
 
     boolean demotePrimaryToSecondary(Workspace workspace, List<Workspace> allWorkspaces) {
         if (workspace.level != Level.PRIMARY) return false;
         workspace.level = Level.SECONDARY;
-        unmarkProfileForDeletion(workspace.profileName);
-        save(allWorkspaces);
+        commitWorkspaceProfileState(
+                WORKSPACES, allWorkspaces, false, workspace.profileName, false);
         return true;
     }
 
     void removeWorkspace(Workspace workspace, List<Workspace> allWorkspaces) {
         if (workspace.level == Level.PRIMARY) return;
         allWorkspaces.remove(workspace);
-        markProfileForDeletion(workspace.profileName);
-        save(allWorkspaces);
+        commitWorkspaceProfileState(
+                WORKSPACES, allWorkspaces, false, workspace.profileName, true);
     }
 
     void save(List<Workspace> workspaces) {
@@ -240,11 +240,35 @@ final class ReBrowserStore {
 
     void deleteShelvedSecondary(Workspace workspace, List<Workspace> shelvedWorkspaces) {
         if (!shelvedWorkspaces.remove(workspace)) return;
-        markProfileForDeletion(workspace.profileName);
-        saveShelvedSecondaryWorkspaces(shelvedWorkspaces);
+        commitWorkspaceProfileState(SHELVED_SECONDARIES, shelvedWorkspaces, true,
+                workspace.profileName, true);
     }
 
     private void saveWorkspaces(String key, List<Workspace> workspaces, boolean secondaryOnly) {
+        preferences.edit().putString(key,
+                serializeWorkspaces(workspaces, secondaryOnly)).apply();
+    }
+
+    @SuppressLint("ApplySharedPref")
+    private void commitWorkspaceProfileState(
+            String key,
+            List<Workspace> workspaces,
+            boolean secondaryOnly,
+            String profileName,
+            boolean pendingDeletion
+    ) {
+        Set<String> pending = pendingProfileDeletions();
+        if (pendingDeletion) pending.add(profileName);
+        else pending.remove(profileName);
+        // One synchronous SharedPreferences file transaction prevents a persistent workspace
+        // from being committed with a contradictory Profile-deletion marker after a crash.
+        preferences.edit()
+                .putString(key, serializeWorkspaces(workspaces, secondaryOnly))
+                .putStringSet(PENDING_PROFILE_DELETIONS, pending)
+                .commit();
+    }
+
+    private String serializeWorkspaces(List<Workspace> workspaces, boolean secondaryOnly) {
         JSONArray values = new JSONArray();
         int saved = 0;
         for (Workspace workspace : workspaces) {
@@ -275,7 +299,7 @@ final class ReBrowserStore {
                 // org.json only rejects unsupported values; every value here is a bounded string.
             }
         }
-        preferences.edit().putString(key, values.toString()).apply();
+        return values.toString();
     }
 
     Set<String> pendingProfileDeletions() {

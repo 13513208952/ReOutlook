@@ -102,7 +102,7 @@ creates a 子标签页, a 总标签页 counter, and a Chrome-style overflow popu
 right. Its monochrome shortcut row uses five true circular buttons for back, forward, favorite,
 application-only orientation switching, and refresh. Tapping orientation switches and locks between
 portrait and sensor-landscape; long-pressing it returns orientation control to the system without
-changing the system rotation setting. URL favorites and secondary-environment bookmarks each have a
+changing the system rotation setting. URL favorites use one URL per row with explicit edit/delete controls; secondary-environment bookmarks use environment cards. Both have a
 dedicated manager opened from this menu instead of occupying persistent rows above the webpage. The
 popup deliberately omits duplicate create/manage/close tab actions and the earlier page-info action.
 
@@ -142,6 +142,16 @@ A restored page without history is sent to the configured homepage. Only at the 
 first back show an anti-mistouch confirmation and a second back within two seconds exit the entire
 application. ReOutlook applies the equivalent policy using the Outlook mailbox list as its homepage.
 
+## Download model
+
+Downloads exist only in ReBrowser. A request is bound to the callback WebView's owned named Profile and current top-level origin; ReOutlook's Default Profile is never queried. HTTP(S) requests may pass that exact Profile's Cookie, the WebView user agent, and a restricted Referer to Android DownloadManager. Cookie values are neither logged nor persisted. Persistent history stores only the request origin, so an interrupted request that required a signed URL must be reissued by the source page after process restart.
+
+Administrators can globally disable new ReBrowser downloads without interrupting already-running transfers; disabling also rejects the bounded pending queue. Each `Profile + top-level origin` has a persistent five-minute attempt window. The first two attempts receive ordinary confirmation; the third and later attempts enter a bounded pending list without repeated modal prompts. Rejected, failed, and repeated requests count. The list supports progress, cancellation, explicit retry, deletion, SHA-256, and risk reasons. File names are sanitized; risky extensions/MIME types, active-document signatures, executable magic, archives, shebangs and selected MIME/extension mismatches are flagged.
+
+Blob download uses a fixed application-authored fetch-and-slice script, a one-time in-page object name, 128 KiB Base64 chunks, one active transfer, a 1 GiB cap, origin continuity checks and streamed temporary output. Data URLs use a 32 MiB cap. Neither path exposes arbitrary script execution. Files are never automatically opened, installed, previewed, unpacked or executed. A user can explicitly hand a completed `content://` URI with read-only permission to Android's chooser. ReBrowser declares no package-install permission and never loads local HTML in its WebView.
+
+WebView DownloadListener does not expose an original POST body or full Service Worker request context. ReBrowser can safely reconstruct ordinary GET downloads, but does not claim complete Chrome compatibility for POST- or worker-generated transfers.
+
 ## Administrator development control
 
 The ADB-only ReBrowser protocol-v2 bridge provides per-request structured results, object-ID
@@ -151,7 +161,7 @@ alone is restricted to levels one and two. This deliberately does not weaken ReO
 mail-export rule. The protocol and bounded command set are documented in
 [REBROWSER_ADMIN_CONTROL.md](REBROWSER_ADMIN_CONTROL.md).
 
-Next stages include page thumbnails, a full new-tab page, favorite editing and folders, site
-information, sharing, downloads, dark mode, broader settings, and bounded WebView navigation-state
-restoration.
+Next stages include page thumbnails, a full new-tab page, favorite folders, site information,
+sharing, dark mode, broader settings, website-permission design, incognito lifecycle design, and
+bounded WebView navigation-state restoration.
 Borrowed-profile behavior remains deferred.

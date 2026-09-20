@@ -24,7 +24,7 @@ final class ReBrowserFavorites {
     static final class Favorite {
         final String id;
         String title;
-        final String url;
+        String url;
 
         Favorite(String id, String title, String url) {
             this.id = id;
@@ -78,6 +78,23 @@ final class ReBrowserFavorites {
         favorites.add(favorite);
         save(favorites);
         return favorite;
+    }
+
+    boolean update(
+            List<Favorite> favorites,
+            Favorite favorite,
+            String title,
+            String url
+    ) {
+        if (favorite == null || !favorites.contains(favorite)) return false;
+        String safeUrl = validUrl(url);
+        if (safeUrl.isEmpty()) return false;
+        Favorite existing = findByUrl(favorites, safeUrl);
+        if (existing != null && existing != favorite) return false;
+        favorite.url = safeUrl;
+        favorite.title = cleanTitle(title, safeUrl);
+        save(favorites);
+        return true;
     }
 
     void remove(List<Favorite> favorites, Favorite favorite) {

@@ -50,6 +50,17 @@ final class ReBrowserAdminProtocol {
     static final String OP_CLOSE_WORKSPACE = "CLOSE_WORKSPACE";
     static final String OP_CLOSE_TAB = "CLOSE_TAB";
     static final String OP_DELETE_SHELVED = "DELETE_SHELVED";
+    static final String OP_SHOW_DOWNLOADS = "SHOW_DOWNLOADS";
+    static final String OP_GET_DOWNLOAD_POLICY = "GET_DOWNLOAD_POLICY";
+    static final String OP_SET_DOWNLOAD_POLICY = "SET_DOWNLOAD_POLICY";
+    static final String OP_GET_DOWNLOADS = "GET_DOWNLOADS";
+    static final String OP_APPROVE_DOWNLOAD = "APPROVE_DOWNLOAD";
+    static final String OP_REJECT_DOWNLOAD = "REJECT_DOWNLOAD";
+    static final String OP_CANCEL_DOWNLOAD = "CANCEL_DOWNLOAD";
+    static final String OP_RETRY_DOWNLOAD = "RETRY_DOWNLOAD";
+    static final String OP_DELETE_DOWNLOAD = "DELETE_DOWNLOAD";
+    static final String OP_CLEAR_DOWNLOADS = "CLEAR_DOWNLOADS";
+    static final String OP_REPAIR_DOWNLOADS = "REPAIR_DOWNLOADS";
 
     private static final Set<String> OPERATIONS = new HashSet<>(Arrays.asList(
             OP_OPEN_URL, OP_NEW_WORKSPACE, OP_NEW_CHILD_TAB, OP_SHOW_WORKSPACES,
@@ -60,11 +71,18 @@ final class ReBrowserAdminProtocol {
             OP_ASSERT_LOCATION,
             OP_LOCK_SECONDARY, OP_UNLOCK_TEMPORARY, OP_PROMOTE_PRIMARY,
             OP_DEMOTE_SECONDARY, OP_SHELVE_WORKSPACE, OP_RESTORE_WORKSPACE,
-            OP_CLOSE_WORKSPACE, OP_CLOSE_TAB, OP_DELETE_SHELVED));
+            OP_CLOSE_WORKSPACE, OP_CLOSE_TAB, OP_DELETE_SHELVED,
+            OP_SHOW_DOWNLOADS, OP_GET_DOWNLOAD_POLICY, OP_SET_DOWNLOAD_POLICY,
+            OP_GET_DOWNLOADS,
+            OP_APPROVE_DOWNLOAD, OP_REJECT_DOWNLOAD, OP_CANCEL_DOWNLOAD,
+            OP_RETRY_DOWNLOAD, OP_DELETE_DOWNLOAD, OP_CLEAR_DOWNLOADS,
+            OP_REPAIR_DOWNLOADS));
     private static final Set<String> LEVEL_TWO = new HashSet<>(Arrays.asList(
             OP_LOCK_SECONDARY, OP_UNLOCK_TEMPORARY, OP_PROMOTE_PRIMARY,
             OP_DEMOTE_SECONDARY, OP_SHELVE_WORKSPACE, OP_RESTORE_WORKSPACE,
-            OP_CLOSE_WORKSPACE, OP_CLOSE_TAB, OP_DELETE_SHELVED));
+            OP_CLOSE_WORKSPACE, OP_CLOSE_TAB, OP_DELETE_SHELVED,
+            OP_APPROVE_DOWNLOAD, OP_REJECT_DOWNLOAD, OP_CANCEL_DOWNLOAD,
+            OP_RETRY_DOWNLOAD, OP_DELETE_DOWNLOAD, OP_SET_DOWNLOAD_POLICY));
     private static final Pattern REQUEST_ID = Pattern.compile("[A-Za-z0-9_-]{8,80}");
     private static final Pattern OBJECT_ID = Pattern.compile("[a-f0-9]{32}");
     private static final String PREFERENCES = "rebrowser_admin_protocol_v2";
@@ -103,6 +121,10 @@ final class ReBrowserAdminProtocol {
         if (!OPERATIONS.contains(operation)) throw new SecurityException("Unsupported operation");
         validateOptionalId(request, "workspaceId");
         validateOptionalId(request, "tabId");
+        validateOptionalId(request, "downloadId");
+        if (requiresDownload(operation) && !request.has("downloadId")) {
+            throw new SecurityException("downloadId is required");
+        }
         if (requiresWorkspace(operation) && !request.has("workspaceId")) {
             throw new SecurityException("workspaceId is required");
         }
@@ -114,7 +136,9 @@ final class ReBrowserAdminProtocol {
             requireHttpUrl(request.optString("url", ""));
         }
         if ((OP_CLOSE_WORKSPACE.equals(operation) || OP_CLOSE_TAB.equals(operation)
-                || OP_DELETE_SHELVED.equals(operation))
+                || OP_DELETE_SHELVED.equals(operation)
+                || OP_DELETE_DOWNLOAD.equals(operation)
+                || OP_CLEAR_DOWNLOADS.equals(operation))
                 && !request.optBoolean("confirmDelete", false)) {
             throw new SecurityException("Explicit confirmDelete=true is required");
         }
@@ -126,12 +150,17 @@ final class ReBrowserAdminProtocol {
             throw new SecurityException("timeoutSeconds must be between 1 and 60");
         }
         if (OP_SET_PREFERENCE.equals(operation)) validatePreference(request);
+        if (OP_SET_DOWNLOAD_POLICY.equals(operation)
+                && !(request.opt("downloadsEnabled") instanceof Boolean)) {
+            throw new SecurityException("downloadsEnabled must be boolean");
+        }
         request.put("authorizationLevel", authorizationLevel(operation));
         return request;
     }
 
     static int authorizationLevel(String operation) {
-        if (OP_REPAIR_STATE.equals(operation)) return 3;
+        if (OP_REPAIR_STATE.equals(operation) || OP_REPAIR_DOWNLOADS.equals(operation)
+                || OP_CLEAR_DOWNLOADS.equals(operation)) return 3;
         return LEVEL_TWO.contains(operation) ? 2 : 1;
     }
 
@@ -243,6 +272,9 @@ final class ReBrowserAdminProtocol {
         entry.put("keyId", result.optString("keyId"));
         if (request.has("workspaceId")) entry.put("workspaceId", request.optString("workspaceId"));
         if (request.has("tabId")) entry.put("tabId", request.optString("tabId"));
+        if (request.has("downloadId")) {
+            entry.put("downloadId", request.optString("downloadId"));
+        }
         retained.put(entry);
         for (int index = 0; index < previous.length() && retained.length() < MAX_AUDIT; index++) {
             JSONObject value = previous.optJSONObject(index);
@@ -270,6 +302,12 @@ final class ReBrowserAdminProtocol {
 
     private static boolean requiresTab(String operation) {
         return OP_ACTIVATE_TAB.equals(operation) || OP_CLOSE_TAB.equals(operation);
+    }
+
+    private static boolean requiresDownload(String operation) {
+        return OP_APPROVE_DOWNLOAD.equals(operation) || OP_REJECT_DOWNLOAD.equals(operation)
+                || OP_CANCEL_DOWNLOAD.equals(operation) || OP_RETRY_DOWNLOAD.equals(operation)
+                || OP_DELETE_DOWNLOAD.equals(operation);
     }
 
     private static void requireHttpUrl(String url) {
