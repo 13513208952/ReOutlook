@@ -10,8 +10,8 @@ android {
         applicationId = "io.github.reoutlook"
         minSdk = 26
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.3.4-alpha"
+        versionCode = 8
+        versionName = "0.3.5-alpha"
     }
 
     buildTypes {
