@@ -1,12 +1,9 @@
 package io.github.reoutlook;
 
-import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.StatFs;
@@ -35,7 +32,6 @@ final class ReBrowserDownloadController {
         void onDownloadRecordsChanged();
         void onDownloadConfirmationRequired(ReBrowserDownloads.Record record);
         void onDownloadMessage(String message);
-        void onStoragePermissionRequired();
     }
 
     static final class RepairResult {
@@ -62,7 +58,6 @@ final class ReBrowserDownloadController {
             Collections.unmodifiableList(records);
     private final Set<String> hashingIds = new HashSet<>();
     private final Set<String> customIds = new HashSet<>();
-    private String awaitingStorageId;
     private BlobTransfer activeBlobTransfer;
 
     ReBrowserDownloadController(
@@ -74,6 +69,7 @@ final class ReBrowserDownloadController {
         this.pageBridge = pageBridge;
         this.listener = listener;
         store = new ReBrowserDownloads(this.context);
+        store.cleanupInterruptedTemporaryFiles();
         records.addAll(store.load());
         refresh();
     }
@@ -152,21 +148,32 @@ final class ReBrowserDownloadController {
             return;
         }
         records.add(0, record);
+        if (ReBrowserDownloads.KIND_HTTP.equals(kind)
+                && !"GET".equalsIgnoreCase(request.requestMethod)) {
+            String reason = request.requestMethod == null || request.requestMethod.isBlank()
+                    ? "unsupported-request-context"
+                    : "unsupported-request-method:" + request.requestMethod;
+            rejectWith(record, reason);
+            saveAndNotify();
+            message("无法确认该请求为普通 GET 下载，已拒绝");
+            return;
+        }
         if (!store.downloadsEnabled()) {
             rejectWith(record, "administrator-policy-disabled");
             saveAndNotify();
             message("管理员已暂停 ReBrowser 新下载");
             return;
         }
+        int globalPending = pendingCount(null);
+        int sitePending = pendingCount(siteKey);
+        if (globalPending > MAX_PENDING_GLOBAL || sitePending > MAX_PENDING_PER_SITE) {
+            rejectWith(record, "pending-queue-limit");
+            saveAndNotify();
+            message("待确认下载请求过多，已拒绝");
+            return;
+        }
         if (highFrequency) {
-            int global = pendingCount(null);
-            int perSite = pendingCount(siteKey);
-            if (global > MAX_PENDING_GLOBAL || perSite > MAX_PENDING_PER_SITE) {
-                rejectWith(record, "pending-queue-limit");
-                message("该网站的高频下载请求过多，已拒绝");
-            } else {
-                message("高频下载已拦截，请在“下载内容”中确认");
-            }
+            message("高频下载已拦截，请在“下载内容”中确认");
             saveAndNotify();
             return;
         }
@@ -188,32 +195,12 @@ final class ReBrowserDownloadController {
             message("为避免持久化网址令牌，请回到原网页重新发起下载");
             return;
         }
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
-                && context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                != PackageManager.PERMISSION_GRANTED) {
-            awaitingStorageId = record.id;
-            listener.onStoragePermissionRequired();
-            return;
-        }
         if (ReBrowserDownloads.KIND_DATA.equals(record.kind)) {
             startData(record);
         } else if (ReBrowserDownloads.KIND_BLOB.equals(record.kind)) {
             startBlob(record);
         } else {
             startHttp(record);
-        }
-    }
-
-    void onStoragePermissionResult(boolean granted) {
-        ReBrowserDownloads.Record record = find(awaitingStorageId);
-        awaitingStorageId = null;
-        if (record == null) return;
-        if (granted) {
-            approve(record);
-        } else {
-            failRecord(record, "storage-permission-denied");
-            saveAndNotify();
-            message("没有存储权限，无法下载");
         }
     }
 
@@ -399,11 +386,7 @@ final class ReBrowserDownloadController {
         }
         BlobTransfer transfer = null;
         try {
-            File directory = new File(context.getCacheDir(), "rebrowser-downloads");
-            if (!directory.exists() && !directory.mkdirs()) {
-                throw new IllegalStateException("temporary-directory-unavailable");
-            }
-            transfer = new BlobTransfer(record, new File(directory, record.id + ".part"));
+            transfer = new BlobTransfer(record, store.blobTemporaryFile(record.id));
             activeBlobTransfer = transfer;
             customIds.add(record.id);
             record.status = ReBrowserDownloads.STATUS_DOWNLOADING;

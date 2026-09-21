@@ -54,6 +54,8 @@ final class ReBrowserDownloads {
     private static final String DOWNLOADS_ENABLED = "downloads_enabled";
     private static final long RATE_WINDOW_MS = 5 * 60 * 1_000L;
     private static final Pattern ID_PATTERN = Pattern.compile("[a-f0-9]{32}");
+    private static final String CUSTOM_TEMPORARY_PREFIX = "rebrowser-download-";
+    private static final String BLOB_TEMPORARY_DIRECTORY = "rebrowser-downloads";
     private static final Pattern DANGEROUS_EXTENSION = Pattern.compile(
             "(?i).+\\.(apk|apks|xapk|aab|dex|jar|class|so|sh|bash|py|js|mjs|html?|xhtml|svg|wasm|exe|msi|bat|cmd|com|scr|ps1|lnk|url|desktop|reg|dmg|pkg|deb|rpm|docm|xlsm|pptm|p12|pfx|cer|crt|pem|der|key|jks|keystore|mobileconfig|zip|7z|rar|tar|gz)$");
 
@@ -256,6 +258,41 @@ final class ReBrowserDownloads {
         }
     }
 
+    int cleanupInterruptedTemporaryFiles() {
+        int deleted = 0;
+        File[] dataFiles = context.getCacheDir().listFiles();
+        if (dataFiles != null) {
+            for (File file : dataFiles) {
+                String name = file.getName();
+                if (!file.isFile() || !name.startsWith(CUSTOM_TEMPORARY_PREFIX)) continue;
+                String id = name.substring(CUSTOM_TEMPORARY_PREFIX.length());
+                if (ID_PATTERN.matcher(id).matches() && file.delete()) deleted++;
+            }
+        }
+        File blobDirectory = new File(context.getCacheDir(), BLOB_TEMPORARY_DIRECTORY);
+        File[] blobFiles = blobDirectory.listFiles();
+        if (blobFiles != null) {
+            for (File file : blobFiles) {
+                String name = file.getName();
+                if (!file.isFile() || !name.endsWith(".part")) continue;
+                String id = name.substring(0, name.length() - ".part".length());
+                if (ID_PATTERN.matcher(id).matches() && file.delete()) deleted++;
+            }
+        }
+        return deleted;
+    }
+
+    File blobTemporaryFile(String id) {
+        if (!ID_PATTERN.matcher(id == null ? "" : id).matches()) {
+            throw new IllegalArgumentException("invalid-download-id");
+        }
+        File directory = new File(context.getCacheDir(), BLOB_TEMPORARY_DIRECTORY);
+        if (!directory.exists() && !directory.mkdirs()) {
+            throw new IllegalStateException("temporary-directory-unavailable");
+        }
+        return new File(directory, id + ".part");
+    }
+
     Record create(
             String workspaceId,
             String tabId,
@@ -446,7 +483,8 @@ final class ReBrowserDownloads {
                 if (decoded.length > MAX_DATA_BYTES) {
                     throw new IllegalArgumentException("data-url-too-large");
                 }
-                temporary = new File(context.getCacheDir(), "rebrowser-download-" + record.id);
+                temporary = new File(context.getCacheDir(),
+                        CUSTOM_TEMPORARY_PREFIX + record.id);
                 requireCustomDownloadActive(record);
                 try (OutputStream output = new FileOutputStream(temporary)) {
                     output.write(decoded);
@@ -490,7 +528,6 @@ final class ReBrowserDownloads {
         });
     }
 
-    @SuppressWarnings("deprecation")
     private void publishTemporaryFile(Record record, File temporary, String digest)
             throws Exception {
         requireCustomDownloadActive(record);
@@ -498,64 +535,33 @@ final class ReBrowserDownloads {
         if (size > MAX_BLOB_BYTES) throw new IllegalArgumentException("download-too-large");
         inspectFileRisk(record, temporary);
         requireCustomDownloadActive(record);
-        Uri uri;
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.Downloads.DISPLAY_NAME, record.fileName);
-            values.put(MediaStore.Downloads.MIME_TYPE, record.mimeType);
-            values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
-            values.put(MediaStore.Downloads.IS_PENDING, 1);
-            ContentResolver resolver = context.getContentResolver();
-            uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-            if (uri == null) throw new IllegalStateException("media-store-insert-failed");
-            try (InputStream input = new FileInputStream(temporary);
-                    OutputStream output = resolver.openOutputStream(uri, "w")) {
-                if (output == null) throw new IllegalStateException("media-store-open-failed");
-                copy(input, output, record);
-                requireCustomDownloadActive(record);
-            } catch (Exception error) {
-                resolver.delete(uri, null, null);
-                throw error;
-            }
-            values.clear();
-            values.put(MediaStore.Downloads.IS_PENDING, 0);
-            resolver.update(uri, values, null, null);
-            try {
-                requireCustomDownloadActive(record);
-            } catch (java.util.concurrent.CancellationException error) {
-                resolver.delete(uri, null, null);
-                throw error;
-            }
-            record.systemId = -1L;
-        } else {
-            File directory = Environment.getExternalStoragePublicDirectory(
-                    Environment.DIRECTORY_DOWNLOADS);
-            if (!directory.exists() && !directory.mkdirs()) {
-                throw new IllegalStateException("downloads-directory-unavailable");
-            }
-            File destination = uniqueDestination(directory, record.fileName);
-            try (InputStream input = new FileInputStream(temporary);
-                    OutputStream output = new FileOutputStream(destination)) {
-                copy(input, output, record);
-                requireCustomDownloadActive(record);
-            } catch (Exception error) {
-                destination.delete();
-                throw error;
-            }
-            long completedId = manager.addCompletedDownload(record.fileName,
-                    record.sourceOrigin, true, record.mimeType,
-                    destination.getAbsolutePath(), size, false);
-            try {
-                requireCustomDownloadActive(record);
-            } catch (java.util.concurrent.CancellationException error) {
-                manager.remove(completedId);
-                destination.delete();
-                throw error;
-            }
-            record.systemId = completedId;
-            uri = manager.getUriForDownloadedFile(completedId);
-            if (uri == null) throw new IllegalStateException("completed-download-uri-unavailable");
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Downloads.DISPLAY_NAME, record.fileName);
+        values.put(MediaStore.Downloads.MIME_TYPE, record.mimeType);
+        values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+        values.put(MediaStore.Downloads.IS_PENDING, 1);
+        ContentResolver resolver = context.getContentResolver();
+        Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        if (uri == null) throw new IllegalStateException("media-store-insert-failed");
+        try (InputStream input = new FileInputStream(temporary);
+                OutputStream output = resolver.openOutputStream(uri, "w")) {
+            if (output == null) throw new IllegalStateException("media-store-open-failed");
+            copy(input, output, record);
+            requireCustomDownloadActive(record);
+        } catch (Exception error) {
+            resolver.delete(uri, null, null);
+            throw error;
         }
+        values.clear();
+        values.put(MediaStore.Downloads.IS_PENDING, 0);
+        resolver.update(uri, values, null, null);
+        try {
+            requireCustomDownloadActive(record);
+        } catch (java.util.concurrent.CancellationException error) {
+            resolver.delete(uri, null, null);
+            throw error;
+        }
+        record.systemId = -1L;
         synchronized (record) {
             if (!STATUS_DOWNLOADING.equals(record.status)) {
                 if (record.systemId >= 0 && manager != null) manager.remove(record.systemId);
@@ -781,19 +787,6 @@ final class ReBrowserDownloads {
             if (count > 0) output.write(buffer, 0, count);
         }
         requireCustomDownloadActive(record);
-    }
-
-    private static File uniqueDestination(File directory, String fileName) {
-        File candidate = new File(directory, fileName);
-        if (!candidate.exists()) return candidate;
-        int dot = fileName.lastIndexOf('.');
-        String stem = dot > 0 ? fileName.substring(0, dot) : fileName;
-        String extension = dot > 0 ? fileName.substring(dot) : "";
-        for (int index = 1; index < 10_000; index++) {
-            candidate = new File(directory, stem + " (" + index + ")" + extension);
-            if (!candidate.exists()) return candidate;
-        }
-        return new File(directory, UUID.randomUUID().toString() + extension);
     }
 
     private static String safeFileName(String url, String disposition, String mimeType) {

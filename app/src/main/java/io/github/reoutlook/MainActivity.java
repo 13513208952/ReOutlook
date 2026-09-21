@@ -179,12 +179,10 @@ public final class MainActivity extends Activity {
         shape.setColor(Color.rgb(15, 108, 189));
         button.setBackground(shape);
         button.setOnClickListener(view -> openDrawer());
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-            button.addOnLayoutChangeListener((view, left, top, right, bottom,
-                    oldLeft, oldTop, oldRight, oldBottom) ->
-                    view.setSystemGestureExclusionRects(Collections.singletonList(
-                            new Rect(0, 0, view.getWidth(), view.getHeight()))));
-        }
+        button.addOnLayoutChangeListener((view, left, top, right, bottom,
+                oldLeft, oldTop, oldRight, oldBottom) ->
+                view.setSystemGestureExclusionRects(Collections.singletonList(
+                        new Rect(0, 0, view.getWidth(), view.getHeight()))));
 
         float[] down = new float[4];
         boolean[] dragging = new boolean[1];

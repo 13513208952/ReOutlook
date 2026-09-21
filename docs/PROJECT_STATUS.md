@@ -30,7 +30,9 @@
 - 全局方向切换、横屏全屏播放及退出全屏后的界面恢复；
 - 已实现 ReBrowser 下载管理：命名 Profile Cookie、五分钟频率控制、有界待确认队列、进度、取消、重试、删除、SHA-256、风险分类、Data 与固定分块 Blob 提取；
 - 已实现下载管理员语义命令、管理员全局启停新下载（禁用时拒绝待确认请求但不破坏运行中任务）及非 HTTP(S) 外部 Intent 收紧；
-- 真机验证了 Bing HTTPS 文件下载、命名 Profile Cookie 绑定标记、Data 下载、固定分块 Blob 下载、SHA-256、高频第三次拦截、待确认列表、危险文件二次警告、只读 `content://` 系统选择器交接，以及管理员查询／拒绝／修复／全局清理和全局启停。禁用策略下的新请求无模态框并以结构化原因拒绝，重新启用后恢复普通确认；8 MiB Blob 在传输中取消后保持取消状态且无临时文件残留；Blob 测试的 SHA-256 与离线计算一致。
+- 真机验证了 Bing HTTPS 文件下载、命名 Profile Cookie 绑定标记、Data 下载、固定分块 Blob 下载、SHA-256、高频第三次拦截、待确认列表、危险文件二次警告、只读 `content://` 系统选择器交接，以及管理员查询／拒绝／修复／全局清理和全局启停。禁用策略下的新请求无模态框并以结构化原因拒绝，重新启用后恢复普通确认；64 MiB Blob 在 25 MiB 后取消并成功重试至完成，SHA-256 已生成；96 MiB Blob 在进程中断后明确变为 `custom-download-interrupted`，其受控 `.part` 文件在下次启动时删除。
+- 已增加 16 个 JVM 回归测试和隔离设备状态的 instrumentation，覆盖 Workspace 生命周期、频率窗口、待确认上限、管理员授权边界、审计脱敏、下载持久化脱敏、取消竞态、进程中断临时文件清理，以及 POST／未知请求上下文的明确拒绝。
+- 最低支持版本现为 Android 10／API 29；Android 8/9 留待未来采用完整浏览器内核路线时重新评估。
 
 当前主要测试设备使用 Google Android WebView 149.0.7827.48。运行时仍然保留功能检查；不支持 `MULTI_PROFILE` 的提供者不会启用 ReBrowser。
 
@@ -43,14 +45,14 @@
 - ReBrowser 仍基于系统 WebView，不具备完整浏览器内核产品的全部能力；
 - ReBrowser 管理接口仍是有界语义命令集，不提供任意脚本、数据库或私有文件访问；
 - 新增的三段视频方向覆写已完成构建和设置界面检查，所有策略组合尚未逐项手工验证；
-- WebView `DownloadListener` 不提供原始 POST 正文或完整 Service Worker 请求上下文；此类下载可能只能按 GET 重建或明确失败，不能承诺 Chrome 级兼容性；
-- 仍需用必须登录且服务器实际校验 Cookie 的下载端点验证端到端登录态；大文件取消／重试、进程中断、POST/Service Worker 失败路径及 Android 8/9 兼容路径仍需真机验证；
+- WebView `DownloadListener` 不提供原始 POST 正文或完整 Service Worker 请求上下文；ReBrowser 只接受 WebViewClient 同页观察到的 GET 下载，已观察到的非 GET 请求以 `unsupported-request-method` 拒绝，无法关联请求上下文的回调以 `unsupported-request-context` 拒绝，仍不能承诺 Chrome 级兼容性；
+- 仍需用必须登录且服务器实际校验 Cookie 的下载端点验证端到端登录态；
 - 面向普通用户的显式备份与恢复尚未完成；
 - 当前公开 APK 使用开发者 Debug 证书签名，不是长期生产发布密钥。
 
 ## 后续方向
 
-1. 补充验证真实登录态、大文件取消／重试、进程中断、POST/Service Worker 和 Android 8/9 下载路径；
+1. 补充验证必须登录且服务器实际拒绝无 Cookie 请求的真实下载端点；
 2. 讨论摄像头、麦克风、定位、通知及其他网站权限，并设计无痕模式与命名 Profile 生命周期的关系；
 3. 继续完善浏览器站点信息、分享、深色模式和受限历史恢复；
 4. 验证 Outlook 长会话、远端删除和第二账号隔离；

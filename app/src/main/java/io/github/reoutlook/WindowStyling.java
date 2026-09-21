@@ -38,10 +38,8 @@ public final class WindowStyling {
                             | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
             );
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            window.setStatusBarContrastEnforced(false);
-            window.setNavigationBarContrastEnforced(false);
-        }
+        window.setStatusBarContrastEnforced(false);
+        window.setNavigationBarContrastEnforced(false);
 
         content.setOnApplyWindowInsetsListener((view, insets) -> {
             int left;

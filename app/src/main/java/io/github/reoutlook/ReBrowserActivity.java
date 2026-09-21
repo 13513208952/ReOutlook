@@ -1,13 +1,11 @@
 package io.github.reoutlook;
 
-import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Color;
@@ -44,7 +42,6 @@ import java.util.List;
 public final class ReBrowserActivity extends Activity
         implements ReBrowserAdminController.Host {
     private static final int FILE_CHOOSER_REQUEST = 5102;
-    private static final int DOWNLOAD_STORAGE_REQUEST = 5103;
     private static final long DOUBLE_BACK_INTERVAL_MS = 2_000L;
 
     private List<ReBrowserStore.Workspace> workspaces = List.of();
@@ -2073,23 +2070,5 @@ public final class ReBrowserActivity extends Activity
             toast(message);
         }
 
-        @Override
-        public void onStoragePermissionRequired() {
-            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
-                    DOWNLOAD_STORAGE_REQUEST);
-        }
-    }
-
-    @Override
-    public void onRequestPermissionsResult(
-            int requestCode,
-            String[] permissions,
-            int[] grantResults
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode != DOWNLOAD_STORAGE_REQUEST) return;
-        downloadController.onStoragePermissionResult(
-                grantResults.length > 0
-                        && grantResults[0] == PackageManager.PERMISSION_GRANTED);
     }
 }

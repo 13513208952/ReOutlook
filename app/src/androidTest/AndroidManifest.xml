@@ -5,4 +5,9 @@
         android:functionalTest="true"
         android:handleProfiling="false"
         android:targetPackage="io.github.reoutlook" />
+    <instrumentation
+        android:name="io.github.reoutlook.ReBrowserRegressionInstrumentation"
+        android:functionalTest="true"
+        android:handleProfiling="false"
+        android:targetPackage="io.github.reoutlook" />
 </manifest>

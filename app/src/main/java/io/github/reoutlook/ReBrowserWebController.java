@@ -72,6 +72,7 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
         final String sourceUrl;
         final String sourceOrigin;
         final String url;
+        final String requestMethod;
         final String userAgent;
         final String contentDisposition;
         final String mimeType;
@@ -84,6 +85,7 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
                 String sourceUrl,
                 String sourceOrigin,
                 String url,
+                String requestMethod,
                 String userAgent,
                 String contentDisposition,
                 String mimeType,
@@ -95,6 +97,7 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
             this.sourceUrl = sourceUrl;
             this.sourceOrigin = sourceOrigin;
             this.url = url;
+            this.requestMethod = requestMethod;
             this.userAgent = userAgent;
             this.contentDisposition = contentDisposition;
             this.mimeType = mimeType;
@@ -121,6 +124,8 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
         final WebView webView;
         final long generation;
         long navigationGeneration;
+        final java.util.LinkedHashMap<String, RequestMethodObservation> requestMethods =
+                new java.util.LinkedHashMap<>();
         boolean loading;
         int loadProgress;
         String lastMainFrameError = "";
@@ -137,6 +142,16 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
             this.tab = tab;
             this.webView = webView;
             this.generation = generation;
+        }
+    }
+
+    private static final class RequestMethodObservation {
+        final String method;
+        final long observedAt;
+
+        RequestMethodObservation(String method, long observedAt) {
+            this.method = method;
+            this.observedAt = observedAt;
         }
     }
 
@@ -234,7 +249,7 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
         settings.setAllowContentAccess(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         settings.setSafeBrowsingEnabled(true);
-        webView.setWebViewClient(new BrowserClient());
+        webView.setWebViewClient(new BrowserClient(page));
         webView.setWebChromeClient(new ChromeClient());
         webView.setDownloadListener((url, userAgent, disposition, mimeType, contentLength) ->
                 dispatchDownload(page, url, userAgent, disposition, mimeType, contentLength));
@@ -546,6 +561,34 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
         return null;
     }
 
+    private static void rememberRequestMethod(
+            PageBinding page,
+            String url,
+            String method
+    ) {
+        String normalized = method == null ? "" : method.toUpperCase(Locale.ROOT);
+        if (url == null || url.isBlank()) return;
+        synchronized (page.requestMethods) {
+            page.requestMethods.put(url,
+                    new RequestMethodObservation(normalized, System.currentTimeMillis()));
+            while (page.requestMethods.size() > 32) {
+                String oldest = page.requestMethods.keySet().iterator().next();
+                page.requestMethods.remove(oldest);
+            }
+        }
+    }
+
+    private static String observedRequestMethod(PageBinding page, String url) {
+        synchronized (page.requestMethods) {
+            RequestMethodObservation observation = page.requestMethods.remove(url);
+            if (observation == null
+                    || observation.observedAt < System.currentTimeMillis() - 120_000L) {
+                return "";
+            }
+            return observation.method;
+        }
+    }
+
     private void dispatchDownload(
             PageBinding page,
             String url,
@@ -558,11 +601,17 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
         String sourceUrl = page.webView.getUrl() == null ? page.tab.url : page.webView.getUrl();
         listener.onDownloadRequested(new DownloadRequest(
                 page.workspaceId, page.tab.id, page.profileName,
-                sourceUrl, safeOrigin(sourceUrl), url, userAgent,
-                disposition, mimeType, contentLength));
+                sourceUrl, safeOrigin(sourceUrl), url, observedRequestMethod(page, url),
+                userAgent, disposition, mimeType, contentLength));
     }
 
     private final class BrowserClient extends WebViewClient {
+        private final PageBinding binding;
+
+        BrowserClient(PageBinding binding) {
+            this.binding = binding;
+        }
+
         @Override
         public void onPageStarted(WebView view, String url, Bitmap favicon) {
             PageBinding page = pagesByView.get(view);
@@ -582,6 +631,18 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
             page.loadProgress = 100;
             listener.onPageFinished(
                     page.tab, url, view.getTitle(), view.getParent() == container);
+        }
+
+        @Override
+        public android.webkit.WebResourceResponse shouldInterceptRequest(
+                WebView view,
+                WebResourceRequest request
+        ) {
+            PageBinding page = binding;
+            if (request != null) {
+                rememberRequestMethod(page, request.getUrl().toString(), request.getMethod());
+            }
+            return super.shouldInterceptRequest(view, request);
         }
 
         @Override

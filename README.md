@@ -53,7 +53,7 @@ ReBrowser 管理协议还提供有界的下载策略、任务、批准、拒绝�
 
 ## 下载与安装
 
-开发者预览 APK 发布在 [GitHub Releases](https://github.com/13513208952/ReOutlook/releases)。当前公开包使用 Android Debug 证书签署，以便测试设备连续升级，但 Release 构建本身不含 `DEBUGGABLE` 标志。不要把该签名视为正式生产签名。
+开发者预览 APK 发布在 [GitHub Releases](https://github.com/13513208952/ReOutlook/releases)。当前版本要求 Android 10／API 29 或更高版本；Android 8/9 留待未来完整浏览器内核路线重新评估。当前公开包使用 Android Debug 证书签署，以便测试设备连续升级，但 Release 构建本身不含 `DEBUGGABLE` 标志。不要把该签名视为正式生产签名。
 
 也可以从源码构建。要求 JDK 17 和 Android SDK 36：
 
