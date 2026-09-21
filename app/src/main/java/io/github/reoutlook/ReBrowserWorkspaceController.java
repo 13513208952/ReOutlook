@@ -62,14 +62,6 @@ final class ReBrowserWorkspaceController {
         return activeWorkspace;
     }
 
-    boolean containsActive(ReBrowserStore.Workspace workspace) {
-        return activeWorkspaces.contains(workspace);
-    }
-
-    boolean containsShelved(ReBrowserStore.Workspace workspace) {
-        return shelvedWorkspaces.contains(workspace);
-    }
-
     int totalWorkspaceCount() {
         return activeWorkspaces.size() + shelvedWorkspaces.size();
     }
@@ -167,14 +159,6 @@ final class ReBrowserWorkspaceController {
         }
     }
 
-    void renameActiveWorkspace(String title) {
-        if (activeWorkspace == null || title == null) return;
-        String clean = title.replaceAll("\\s+", " ").trim();
-        if (clean.isEmpty()) return;
-        activeWorkspace.title = boundedTitle(clean);
-        save();
-    }
-
     boolean lockAsSecondary(ReBrowserStore.Workspace workspace) {
         return activeWorkspaces.contains(workspace)
                 && store.lockAsSecondary(workspace, activeWorkspaces);
@@ -237,10 +221,6 @@ final class ReBrowserWorkspaceController {
 
     Set<String> pendingProfileDeletions() {
         return store.pendingProfileDeletions();
-    }
-
-    void markProfileForDeletion(String profileName) {
-        store.markProfileForDeletion(profileName);
     }
 
     void unmarkProfileForDeletion(String profileName) {

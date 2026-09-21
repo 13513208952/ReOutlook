@@ -38,11 +38,13 @@ final class ReBrowserAdminController {
         void closeTab(ReBrowserStore.Tab tab);
         void deleteProfileIfPossible(String profileName);
         void navigateActiveTab(String url);
+        void onWebsitePermissionPolicyChanged();
     }
 
     private final Context context;
     private final ReBrowserWorkspaceController workspaceController;
     private final ReBrowserPreferences preferences;
+    private final ReBrowserSitePermissions sitePermissions;
     private final ReBrowserFullscreenController fullscreenController;
     private final ReBrowserWebController webController;
     private final ReBrowserDownloadController downloadController;
@@ -54,6 +56,7 @@ final class ReBrowserAdminController {
             Context context,
             ReBrowserWorkspaceController workspaceController,
             ReBrowserPreferences preferences,
+            ReBrowserSitePermissions sitePermissions,
             ReBrowserFullscreenController fullscreenController,
             ReBrowserWebController webController,
             ReBrowserDownloadController downloadController,
@@ -62,6 +65,7 @@ final class ReBrowserAdminController {
         this.context = context.getApplicationContext();
         this.workspaceController = workspaceController;
         this.preferences = preferences;
+        this.sitePermissions = sitePermissions;
         this.fullscreenController = fullscreenController;
         this.webController = webController;
         this.downloadController = downloadController;
@@ -103,6 +107,26 @@ final class ReBrowserAdminController {
             return downloadPolicy().put("rejectedPendingCount", rejected);
         }
         if (ReBrowserAdminProtocol.OP_GET_DOWNLOADS.equals(operation)) return downloads();
+        if (ReBrowserAdminProtocol.OP_GET_SITE_PERMISSIONS.equals(operation)) {
+            return websitePermissions();
+        }
+        if (ReBrowserAdminProtocol.OP_DISABLE_SITE_PERMISSION.equals(operation)) {
+            String permission = request.getString("permission");
+            if (ReBrowserSitePermissions.BACKGROUND_RUNTIME_PERMISSION.equals(permission)) {
+                sitePermissions.setBackgroundRuntimeEnabled(false);
+            } else {
+                sitePermissions.setCapabilityEnabled(permission, false);
+            }
+            host.onWebsitePermissionPolicyChanged();
+            return websitePermissions().put("disabled", permission);
+        }
+        if (ReBrowserAdminProtocol.OP_CLEAR_SITE_PERMISSION_GRANTS.equals(operation)) {
+            String permission = request.optString("permission", "");
+            int cleared = sitePermissions.clearGrants(permission);
+            host.onWebsitePermissionPolicyChanged();
+            return websitePermissions().put("clearedGrantCount", cleared)
+                    .put("clearedPermission", permission);
+        }
         if (activeWorkspace() == null) throw new IllegalStateException("ReBrowser-disabled");
         if (ReBrowserAdminProtocol.OP_GET_STATE.equals(operation)) return state();
         if (ReBrowserAdminProtocol.OP_VALIDATE_STATE.equals(operation)) return validateState();
@@ -426,6 +450,7 @@ final class ReBrowserAdminController {
                 WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA));
         value.put("saveState", WebViewFeature.isFeatureSupported(WebViewFeature.SAVE_STATE));
         value.put("downloads", downloadPolicy());
+        value.put("websitePermissions", websitePermissionPolicy());
         return value;
     }
 
@@ -456,7 +481,45 @@ final class ReBrowserAdminController {
         value.put("downloadsEnabled", downloadController.downloadsEnabled());
         value.put("pendingDownloadCount", downloadController.pendingCount());
         value.put("activeBlobTransfer", downloadController.hasActiveBlobTransfer());
+        value.put("websitePermissionGrantCount",
+                sitePermissions.grants(System.currentTimeMillis()).size());
+        value.put("backgroundRuntimeEnabled", sitePermissions.backgroundRuntimeEnabled());
         return value;
+    }
+
+    private JSONObject websitePermissions() throws Exception {
+        JSONArray grants = new JSONArray();
+        for (ReBrowserSitePermissions.Grant grant
+                : sitePermissions.grants(System.currentTimeMillis())) {
+            grants.put(new JSONObject()
+                    .put("profileName", grant.profileName)
+                    .put("origin", grant.origin)
+                    .put("permission", grant.permission)
+                    .put("grantedAt", grant.grantedAt)
+                    .put("expiresAt", grant.expiresAt));
+        }
+        return websitePermissionPolicy().put("grants", grants)
+                .put("grantCount", grants.length());
+    }
+
+    private JSONObject websitePermissionPolicy() throws Exception {
+        return new JSONObject()
+                .put("clipboard", sitePermissions.capabilityEnabled(
+                        ReBrowserSitePermissions.CLIPBOARD))
+                .put("approximateLocation", sitePermissions.capabilityEnabled(
+                        ReBrowserSitePermissions.APPROXIMATE_LOCATION))
+                .put("preciseLocation", sitePermissions.capabilityEnabled(
+                        ReBrowserSitePermissions.PRECISE_LOCATION))
+                .put("camera", sitePermissions.capabilityEnabled(
+                        ReBrowserSitePermissions.CAMERA))
+                .put("microphone", sitePermissions.capabilityEnabled(
+                        ReBrowserSitePermissions.MICROPHONE))
+                .put("notifications", false)
+                .put("backgroundPush", false)
+                .put("webSensors", false)
+                .put("backgroundRuntime", sitePermissions.backgroundRuntimeEnabled())
+                .put("administratorCanGrant", false)
+                .put("scope", "profileName+topLevelOrigin");
     }
 
     private JSONObject downloadPolicy() throws Exception {
@@ -593,7 +656,28 @@ final class ReBrowserAdminController {
         }
         if (activeWorkspaces().size() + shelvedWorkspaces().size()
                 > ReBrowserStore.MAX_WORKSPACES) issues.put("workspace-limit-exceeded");
-        return new JSONObject().put("valid", issues.length() == 0).put("issues", issues);
+        ReBrowserSitePermissions.Validation permissionValidation =
+                sitePermissions.validate(System.currentTimeMillis(), false);
+        if (!permissionValidation.valid()) issues.put("website-permission-grants-invalid");
+        return new JSONObject().put("valid", issues.length() == 0).put("issues", issues)
+                .put("websitePermissions", sitePermissionValidation(permissionValidation));
+    }
+
+    private static JSONObject sitePermissionValidation(
+            ReBrowserSitePermissions.Validation validation
+    ) throws Exception {
+        return new JSONObject()
+                .put("valid", validation.valid())
+                .put("storedCount", validation.storedCount)
+                .put("validCount", validation.validCount)
+                .put("malformedCount", validation.malformedCount)
+                .put("expiredCount", validation.expiredCount)
+                .put("futureCount", validation.futureCount)
+                .put("disabledCount", validation.disabledCount)
+                .put("duplicateCount", validation.duplicateCount)
+                .put("excessCount", validation.excessCount)
+                .put("malformedStorage", validation.malformedStorage)
+                .put("repaired", validation.repaired);
     }
 
     private JSONObject repairState() throws Exception {
@@ -615,7 +699,11 @@ final class ReBrowserAdminController {
             }
         }
         workspaceController.saveAll();
+        ReBrowserSitePermissions.Validation permissionRepair =
+                sitePermissions.validate(System.currentTimeMillis(), true);
+        if (permissionRepair.repaired) host.onWebsitePermissionPolicyChanged();
         return new JSONObject().put("cancelledDeletionMarkers", cancelledDeletionMarkers)
+                .put("websitePermissionRepair", sitePermissionValidation(permissionRepair))
                 .put("validation", validateState());
     }
 

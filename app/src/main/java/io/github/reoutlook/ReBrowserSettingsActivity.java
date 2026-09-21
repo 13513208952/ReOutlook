@@ -3,6 +3,7 @@ package io.github.reoutlook;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.graphics.Color;
+import android.content.Intent;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.view.Gravity;
@@ -101,6 +102,15 @@ public final class ReBrowserSettingsActivity extends Activity {
                 "新建或重新载入的页面使用桌面布局",
                 preferences.desktopModeEnabled(),
                 preferences::setDesktopModeEnabled));
+        Button sitePermissions = new Button(this);
+        sitePermissions.setText("网站权限管理");
+        sitePermissions.setContentDescription("管理剪贴板、摄像头、麦克风、定位和后台策略");
+        sitePermissions.setOnClickListener(view -> startActivity(
+                new Intent(this, ReBrowserSitePermissionsActivity.class)));
+        LinearLayout.LayoutParams permissionParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
+        permissionParams.setMargins(0, dp(8), 0, dp(4));
+        content.addView(sitePermissions, permissionParams);
 
         content.addView(sectionTitle("总标签页生命周期"));
         content.addView(settingSwitch(

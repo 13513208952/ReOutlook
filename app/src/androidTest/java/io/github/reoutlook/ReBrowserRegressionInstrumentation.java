@@ -41,6 +41,7 @@ public final class ReBrowserRegressionInstrumentation extends Instrumentation {
             testWorkspaceLifecycleAndPersistence();
             testAdministratorAuthorizationBoundaries();
             testDownloadRateRedactionAndCancellation();
+            testWebsitePermissionBoundaries();
             result.putString("status", "passed");
             result.putInt("assertions", assertions);
             finish(Activity.RESULT_OK, result);
@@ -195,12 +196,40 @@ public final class ReBrowserRegressionInstrumentation extends Instrumentation {
                 "unknown-request-context-error-not-explicit");
     }
 
+    private void testWebsitePermissionBoundaries() {
+        ReBrowserSitePermissions permissions = new ReBrowserSitePermissions(isolatedContext);
+        String profile = "rebrowser_workspace_0123456789abcdef0123456789abcdef";
+        long now = System.currentTimeMillis();
+        check(permissions.capabilityEnabled(ReBrowserSitePermissions.CLIPBOARD),
+                "clipboard-default-disabled");
+        check(permissions.capabilityEnabled(ReBrowserSitePermissions.APPROXIMATE_LOCATION),
+                "approximate-location-default-disabled");
+        check(!permissions.capabilityEnabled(ReBrowserSitePermissions.CAMERA),
+                "camera-default-enabled");
+        check(!permissions.capabilityEnabled(ReBrowserSitePermissions.MICROPHONE),
+                "microphone-default-enabled");
+        check(!permissions.capabilityEnabled(ReBrowserSitePermissions.PRECISE_LOCATION),
+                "precise-location-default-enabled");
+        check(!permissions.notificationsEnabled(), "notifications-enabled");
+        check(!permissions.backgroundPushEnabled(), "background-push-enabled");
+        check(!permissions.webSensorsEnabled(), "web-sensors-enabled");
+        check(permissions.grant(profile, "https://example.com/path",
+                ReBrowserSitePermissions.CLIPBOARD,
+                ReBrowserSitePermissions.FIVE_MINUTES_MS, now), "clipboard-grant-failed");
+        check(permissions.hasGrant(profile, "https://example.com",
+                ReBrowserSitePermissions.CLIPBOARD, now + 1), "clipboard-grant-missing");
+        permissions.setCapabilityEnabled(ReBrowserSitePermissions.CLIPBOARD, false);
+        check(!permissions.hasGrant(profile, "https://example.com",
+                ReBrowserSitePermissions.CLIPBOARD, now + 2), "disabled-grant-survived");
+    }
+
     private void clearIsolatedState() {
         for (String name : new String[]{
                 "rebrowser_workspace_store_v1",
                 "rebrowser_admin_protocol_v2",
                 "rebrowser_admin_state_v1",
-                "rebrowser_downloads_v1"
+                "rebrowser_downloads_v1",
+                "rebrowser_site_permissions_v1"
         }) {
             isolatedContext.getSharedPreferences(name, Context.MODE_PRIVATE)
                     .edit().clear().commit();

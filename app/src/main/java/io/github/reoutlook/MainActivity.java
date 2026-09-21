@@ -20,6 +20,8 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewConfiguration;
 import android.webkit.CookieManager;
+import android.webkit.GeolocationPermissions;
+import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
@@ -494,6 +496,7 @@ public final class MainActivity extends Activity {
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
+        settings.setGeolocationEnabled(false);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(false);
@@ -863,6 +866,19 @@ public final class MainActivity extends Activity {
     }
 
     private final class BrowserChromeClient extends WebChromeClient {
+        @Override
+        public void onPermissionRequest(PermissionRequest request) {
+            request.deny();
+        }
+
+        @Override
+        public void onGeolocationPermissionsShowPrompt(
+                String origin,
+                GeolocationPermissions.Callback callback
+        ) {
+            callback.invoke(origin, false, false);
+        }
+
         @Override
         public void onProgressChanged(WebView view, int newProgress) {
             progressBar.setProgress(newProgress);

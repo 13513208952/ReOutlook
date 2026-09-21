@@ -107,17 +107,17 @@ public final class ReBrowserWorkspaceControllerTest {
         ReBrowserStore.Workspace workspace = controller.activeWorkspace();
         assertTrue(controller.lockAsSecondary(workspace));
         assertTrue(controller.shelfSecondary(workspace));
-        assertFalse(controller.containsActive(workspace));
-        assertTrue(controller.containsShelved(workspace));
+        assertFalse(controller.activeWorkspaces().contains(workspace));
+        assertTrue(controller.shelvedWorkspaces().contains(workspace));
         assertFalse(controller.pendingProfileDeletions().contains(workspace.profileName));
 
         assertTrue(controller.restoreSecondary(workspace));
-        assertTrue(controller.containsActive(workspace));
-        assertFalse(controller.containsShelved(workspace));
+        assertTrue(controller.activeWorkspaces().contains(workspace));
+        assertFalse(controller.shelvedWorkspaces().contains(workspace));
 
         assertTrue(controller.shelfSecondary(workspace));
         assertTrue(controller.deleteShelvedSecondary(workspace));
-        assertFalse(controller.containsShelved(workspace));
+        assertFalse(controller.shelvedWorkspaces().contains(workspace));
         assertTrue(controller.pendingProfileDeletions().contains(workspace.profileName));
     }
 }

@@ -10,6 +10,8 @@ Outlook 登录 Cookie、Web Storage 和登录会话由 Android WebView 按网页
 
 ReBrowser 下载历史在应用私有目录中保存净化后的文件名、来源 origin、仅保留 origin 的请求位置、任务状态、大小、风险分类和 SHA-256。实际文件由用户确认后保存到 Android 公共下载集合。登录态 HTTP(S) 下载只把实际命名 Profile 的 Cookie 用于该次系统下载请求；原始 Cookie、Cookie 摘要、Cookie 长度、完整带查询参数下载网址和网址令牌均不进入应用下载历史、管理员结果或审计。为此，应用重启后不能重试需要原始查询参数的旧请求，用户必须回到原网页重新发起。
 
+ReBrowser 网站权限记录只保存命名 Profile、HTTPS origin、权限类型和授权起止时间，不保存剪贴板文本、坐标、照片、音频或视频。剪贴板内容和定位结果仅在当前请求内传递给已经获得用户限时授权的可见页面。网站通知、后台推送和网页运动传感器永久禁止；ReOutlook 不接受网页媒体或定位权限。
+
 ## 网络通信
 
 应用本身没有 ReOutlook 开发者服务器、遥测、广告或分析服务。在线邮件、登录和学校 MFA 流程直接发生在 Outlook、Microsoft 和学校认证网页之间；ReBrowser 访问由用户选择的网站时，也由 WebView 直接连接该网站。

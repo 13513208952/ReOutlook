@@ -341,13 +341,6 @@ public final class MailDatabase extends SQLiteOpenHelper {
         }
     }
 
-    public int totalCount() {
-        try (Cursor cursor = getReadableDatabase().rawQuery(
-                "SELECT COUNT(*) FROM messages", null)) {
-            return cursor.moveToFirst() ? cursor.getInt(0) : 0;
-        }
-    }
-
     public void cleanupLegacyDuplicates() {
         String accountKey = ensureActiveAccount();
         SQLiteDatabase db = getWritableDatabase();

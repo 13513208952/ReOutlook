@@ -61,6 +61,9 @@ final class ReBrowserAdminProtocol {
     static final String OP_DELETE_DOWNLOAD = "DELETE_DOWNLOAD";
     static final String OP_CLEAR_DOWNLOADS = "CLEAR_DOWNLOADS";
     static final String OP_REPAIR_DOWNLOADS = "REPAIR_DOWNLOADS";
+    static final String OP_GET_SITE_PERMISSIONS = "GET_SITE_PERMISSIONS";
+    static final String OP_DISABLE_SITE_PERMISSION = "DISABLE_SITE_PERMISSION";
+    static final String OP_CLEAR_SITE_PERMISSION_GRANTS = "CLEAR_SITE_PERMISSION_GRANTS";
 
     private static final Set<String> OPERATIONS = new HashSet<>(Arrays.asList(
             OP_OPEN_URL, OP_NEW_WORKSPACE, OP_NEW_CHILD_TAB, OP_SHOW_WORKSPACES,
@@ -76,13 +79,15 @@ final class ReBrowserAdminProtocol {
             OP_GET_DOWNLOADS,
             OP_APPROVE_DOWNLOAD, OP_REJECT_DOWNLOAD, OP_CANCEL_DOWNLOAD,
             OP_RETRY_DOWNLOAD, OP_DELETE_DOWNLOAD, OP_CLEAR_DOWNLOADS,
-            OP_REPAIR_DOWNLOADS));
+            OP_REPAIR_DOWNLOADS, OP_GET_SITE_PERMISSIONS,
+            OP_DISABLE_SITE_PERMISSION, OP_CLEAR_SITE_PERMISSION_GRANTS));
     private static final Set<String> LEVEL_TWO = new HashSet<>(Arrays.asList(
             OP_LOCK_SECONDARY, OP_UNLOCK_TEMPORARY, OP_PROMOTE_PRIMARY,
             OP_DEMOTE_SECONDARY, OP_SHELVE_WORKSPACE, OP_RESTORE_WORKSPACE,
             OP_CLOSE_WORKSPACE, OP_CLOSE_TAB, OP_DELETE_SHELVED,
             OP_APPROVE_DOWNLOAD, OP_REJECT_DOWNLOAD, OP_CANCEL_DOWNLOAD,
-            OP_RETRY_DOWNLOAD, OP_DELETE_DOWNLOAD, OP_SET_DOWNLOAD_POLICY));
+            OP_RETRY_DOWNLOAD, OP_DELETE_DOWNLOAD, OP_SET_DOWNLOAD_POLICY,
+            OP_DISABLE_SITE_PERMISSION));
     private static final Pattern REQUEST_ID = Pattern.compile("[A-Za-z0-9_-]{8,80}");
     private static final Pattern OBJECT_ID = Pattern.compile("[a-f0-9]{32}");
     private static final String PREFERENCES = "rebrowser_admin_protocol_v2";
@@ -138,7 +143,8 @@ final class ReBrowserAdminProtocol {
         if ((OP_CLOSE_WORKSPACE.equals(operation) || OP_CLOSE_TAB.equals(operation)
                 || OP_DELETE_SHELVED.equals(operation)
                 || OP_DELETE_DOWNLOAD.equals(operation)
-                || OP_CLEAR_DOWNLOADS.equals(operation))
+                || OP_CLEAR_DOWNLOADS.equals(operation)
+                || OP_CLEAR_SITE_PERMISSION_GRANTS.equals(operation))
                 && !request.optBoolean("confirmDelete", false)) {
             throw new SecurityException("Explicit confirmDelete=true is required");
         }
@@ -150,6 +156,10 @@ final class ReBrowserAdminProtocol {
             throw new SecurityException("timeoutSeconds must be between 1 and 60");
         }
         if (OP_SET_PREFERENCE.equals(operation)) validatePreference(request);
+        if (OP_DISABLE_SITE_PERMISSION.equals(operation)
+                || OP_CLEAR_SITE_PERMISSION_GRANTS.equals(operation)) {
+            validateSitePermission(request, OP_DISABLE_SITE_PERMISSION.equals(operation));
+        }
         if (OP_SET_DOWNLOAD_POLICY.equals(operation)
                 && !(request.opt("downloadsEnabled") instanceof Boolean)) {
             throw new SecurityException("downloadsEnabled must be boolean");
@@ -160,7 +170,8 @@ final class ReBrowserAdminProtocol {
 
     static int authorizationLevel(String operation) {
         if (OP_REPAIR_STATE.equals(operation) || OP_REPAIR_DOWNLOADS.equals(operation)
-                || OP_CLEAR_DOWNLOADS.equals(operation)) return 3;
+                || OP_CLEAR_DOWNLOADS.equals(operation)
+                || OP_CLEAR_SITE_PERMISSION_GRANTS.equals(operation)) return 3;
         return LEVEL_TWO.contains(operation) ? 2 : 1;
     }
 
@@ -317,6 +328,20 @@ final class ReBrowserAdminProtocol {
                 || !("https".equalsIgnoreCase(scheme) || "http".equalsIgnoreCase(scheme))) {
             throw new SecurityException("Only a valid HTTP(S) URL is allowed");
         }
+    }
+
+    private static void validateSitePermission(JSONObject request, boolean allowBackground) {
+        String permission = request.optString("permission", "");
+        if (permission.isBlank()) {
+            if (allowBackground) throw new SecurityException("permission is required");
+            return;
+        }
+        if (ReBrowserSitePermissions.isManaged(permission)) return;
+        if (allowBackground
+                && ReBrowserSitePermissions.BACKGROUND_RUNTIME_PERMISSION.equals(permission)) {
+            return;
+        }
+        throw new SecurityException("Unsupported website permission");
     }
 
     private static void validatePreference(JSONObject request) {

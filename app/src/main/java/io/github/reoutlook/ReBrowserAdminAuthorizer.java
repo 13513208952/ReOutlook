@@ -100,10 +100,6 @@ final class ReBrowserAdminAuthorizer {
         preferences(context).edit().remove(PENDING_CHALLENGE).apply();
     }
 
-    static String lastResult(Context context) {
-        return ReBrowserAdminProtocol.lastResult(context);
-    }
-
     private static JSONObject decodeRequest(String encodedRequest) throws Exception {
         if (encodedRequest == null || encodedRequest.isBlank()) {
             throw new SecurityException("Missing request");

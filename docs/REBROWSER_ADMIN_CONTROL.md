@@ -19,9 +19,11 @@ Other trusted keys, if introduced, must be added with explicit scopes in source 
 
 ## Authorization levels
 
-- **Level 1:** bounded state, diagnostics, navigation, UI routing, browser settings, download policy and redacted download status.
-- **Level 2:** lifecycle and exact-object operations such as locking, shelving, closing, or deleting a specific workspace/tab; enabling/disabling new downloads; and approving, rejecting, cancelling, retrying or deleting one download. Delete commands bind an exact object ID and require `confirmDelete=true`.
-- **Level 3:** invariant repair and global deletion. `REPAIR_STATE` repairs bounded workspace metadata; `REPAIR_DOWNLOADS` reconciles bounded task metadata; `CLEAR_DOWNLOADS` removes every recorded download and corresponding managed file and therefore requires `confirmDelete=true`.
+- **Level 1:** bounded state, diagnostics, navigation, UI routing, browser settings, download policy, redacted download status, and website-permission policy/grant metadata.
+- **Level 2:** lifecycle and exact-object operations such as locking, shelving, closing, or deleting a specific workspace/tab; enabling/disabling new downloads; approving, rejecting, cancelling, retrying or deleting one download; and privacy-preserving one-way disabling of a website capability. Delete commands bind an exact object ID and require `confirmDelete=true`.
+- **Level 3:** invariant repair and global deletion. `REPAIR_STATE` repairs bounded workspace metadata and removes expired, malformed, future-dated, disabled, duplicate or excessive website grants; `REPAIR_DOWNLOADS` reconciles bounded task metadata; `CLEAR_DOWNLOADS` removes every recorded download and corresponding managed file; `CLEAR_SITE_PERMISSION_GRANTS` removes all grants or all grants for one named permission. Global deletion requires `confirmDelete=true`.
+
+Administrator website-permission control is deliberately monotonic: it can query, disable, or clear, but cannot enable a capability, approve a prompt, create an authorization window, or access clipboard, location, camera, or microphone data.
 
 The owner-confirmation screen displays the operation, level, target IDs, and a destructive-operation warning. It does not offer an owner-only approval button for level three.
 
@@ -53,7 +55,8 @@ A bounded audit ring records the request ID, operation, level, authorization met
 - destructive operations: `close-workspace`, `close-tab`, `delete-shelved` with `--confirm-delete`;
 - settings: `set-home` and whitelisted `set-pref` values;
 - downloads: `show-downloads`, `download-policy`, `set-downloads-enabled`, `downloads`, `approve-download`, `reject-download`, `cancel-download`, `retry-download`, and exact-object `delete-download`;
-- level-three bounded repair/global cleanup: `repair`, `repair-downloads`, and `clear-downloads --confirm-delete`.
+- website permissions: `site-permissions`, one-way `disable-site-permission PERMISSION`, and root-only `clear-site-permissions [PERMISSION] --confirm-delete`;
+- level-three bounded repair/global cleanup: `repair`, `repair-downloads`, `clear-downloads --confirm-delete`, and `clear-site-permissions --confirm-delete`.
 
 Examples:
 
@@ -76,6 +79,11 @@ python3 tools/admin/rebrowser_admin.py approve-download DOWNLOAD_ID --key-id reb
 python3 tools/admin/rebrowser_admin.py delete-download DOWNLOAD_ID \
   --confirm-delete --key-id rebrowser-root-v1
 python3 tools/admin/rebrowser_admin.py repair-downloads --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py site-permissions --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py disable-site-permission camera \
+  --key-id rebrowser-root-v1
+python3 tools/admin/rebrowser_admin.py clear-site-permissions clipboard \
+  --confirm-delete --key-id rebrowser-root-v1
 python3 tools/admin/rebrowser_admin.py repair --key-id rebrowser-root-v1
 ```
 
@@ -91,6 +99,8 @@ Use `--auth device` for an owner-approved level-one or level-two command. Run `-
 ## Data boundary
 
 State and diagnostics expose bounded workspace/tab/download IDs, controlled Profile names, titles, page origins, load progress, main-frame errors, lifecycle levels, feature support, non-secret settings, download progress, risk reasons and SHA-256. Page URL paths, queries, and fragments are stripped. Download request locations expose only the HTTP(S) origin; paths, query parameters and fragments are stripped, and Blob/Data payloads are never returned.
+
+Website-permission results expose only global booleans plus Profile name, HTTPS origin, permission type, grant and expiry times. They never expose clipboard values, coordinates, media frames, audio, Android permission payloads, or arbitrary page data. There is intentionally no administrator command to enable a website capability or create a site grant.
 
 The bridge never reads or returns passwords, raw Cookie, Cookie digests, URL tokens, Web Storage, IndexedDB, Service Worker data, or ReOutlook mail. Disabling the download policy rejects pending and new requests while allowing already-running transfers to reach a stable terminal state. Download commands do not include an open, install, preview, unpack, execute, arbitrary destination, or arbitrary header operation. The protocol does not provide arbitrary JavaScript execution, arbitrary database access, arbitrary private-file access, or arbitrary Intent execution.
 

@@ -2,5 +2,6 @@
     <string name="app_name">ReOutlook</string>
     <string name="rebrowser_name">ReBrowser</string>
     <string name="rebrowser_settings_name">ReBrowser 设置</string>
+    <string name="rebrowser_permissions_name">网站权限管理</string>
     <string name="local_mail_count">本地 %1$d 封</string>
 </resources>

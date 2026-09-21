@@ -15,6 +15,9 @@ Do not treat it as a hardened enterprise mail product.
 - Downloaded files are never automatically opened, installed, previewed, unpacked, or executed. ReBrowser does not request package-install permission and hands a user-selected file to Android only with a read-only content URI.
 - Blob/Data extraction uses fixed application code, bounded size, one active Blob transfer, one-time object names, and chunked output; it is not an administrator or website-controlled JavaScript API.
 - Web-page external intents require a foreground main-frame user gesture and an allowlisted scheme. `file:`, `content:`, `javascript:`, and `intent:` navigation is rejected.
+- ReBrowser website grants are bounded to a named Profile, HTTPS top-level origin, permission type, and expiry. Global enablement never grants a site automatically; disabled capabilities reject without prompting and delete existing grants.
+- Camera, microphone, and precise location use one-request or three-hour authorization. Approximate location and text clipboard access use five-minute or fifteen-day authorization. No clipboard value, coordinate, or media data enters permission persistence, administrator results, logs, or audit.
+- Native WebView geolocation is disabled. The fixed semantic location bridge coarsens approximate results before disclosure. Website notifications, push, and motion sensors are permanently disabled. ReOutlook explicitly denies WebView media and geolocation requests even though Android runtime permissions belong to the shared APK.
 
 ## Administrator maintenance interfaces
 

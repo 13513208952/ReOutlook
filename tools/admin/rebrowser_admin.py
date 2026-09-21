@@ -70,6 +70,9 @@ OPERATIONS = {
     "delete-download": "DELETE_DOWNLOAD",
     "clear-downloads": "CLEAR_DOWNLOADS",
     "repair-downloads": "REPAIR_DOWNLOADS",
+    "site-permissions": "GET_SITE_PERMISSIONS",
+    "disable-site-permission": "DISABLE_SITE_PERMISSION",
+    "clear-site-permissions": "CLEAR_SITE_PERMISSION_GRANTS",
 }
 WORKSPACE_ARGUMENT = {
     "activate-workspace", "lock", "unlock", "promote", "demote", "shelve",
@@ -82,7 +85,11 @@ DOWNLOAD_ARGUMENT = {
 }
 DESTRUCTIVE = {
     "close-workspace", "close-tab", "delete-shelved", "delete-download",
-    "clear-downloads",
+    "clear-downloads", "clear-site-permissions",
+}
+SITE_PERMISSIONS = {
+    "camera", "microphone", "precise-location", "approximate-location",
+    "clipboard", "background-runtime",
 }
 BOOLEAN_PREFERENCES = {
     "javascript", "thirdPartyCookies", "desktopMode", "forcePrimaryPromotion",
@@ -168,6 +175,15 @@ def build_request(args: argparse.Namespace) -> dict:
         if not values:
             raise SystemExit("set-downloads-enabled requires true or false")
         request["downloadsEnabled"] = parse_bool(values.pop(0))
+    if args.command == "disable-site-permission":
+        if not values or values[0] not in SITE_PERMISSIONS:
+            raise SystemExit("disable-site-permission requires one of: "
+                             + ", ".join(sorted(SITE_PERMISSIONS)))
+        request["permission"] = values.pop(0)
+    if args.command == "clear-site-permissions" and values:
+        if values[0] not in SITE_PERMISSIONS - {"background-runtime"}:
+            raise SystemExit("clear-site-permissions accepts an optional website permission")
+        request["permission"] = values.pop(0)
     if args.command == "set-pref":
         if len(values) < 2:
             raise SystemExit("set-pref requires NAME VALUE")

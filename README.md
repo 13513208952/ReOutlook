@@ -35,6 +35,8 @@ ReBrowser 的核心原则是 **Persist by intent, not by visitation（由意图�
 - 再次明确提升后成为不可关闭、启动时恢复的主总标签页；
 - 收藏夹以单行网址列表保存标题和网址，书签栏保存完整副总标签页环境；
 - ReBrowser 独占的下载管理支持命名 Profile 登录态、进度、取消、重试、删除、SHA-256，以及受限 Blob/Data 重建；
+- 网站权限按“命名 Profile＋HTTPS 顶层 origin”隔离：剪贴板和模糊定位默认允许申请，摄像头、麦克风和高精度定位默认关闭，所有实际调用都受单次或限时用户授权约束；
+- 网站通知、后台推送和网页运动传感器永久禁止；进入后台后网页暂停并静音，关闭后台运行策略后进一步销毁网页运行时；
 - 同一“Profile＋顶层 origin”五分钟内第三次下载起进入有界待确认队列，危险类型在保存和外部打开前警告；
 - 最多同时存在 5 个主总标签页、64 个总标签页，每个总标签页最多 50 个子标签页；
 - 支持网页新窗口转为当前环境内的子标签页、原生全屏视频、持久化全局方向及独立的视频方向策略；
@@ -49,7 +51,7 @@ ReBrowser 的核心原则是 **Persist by intent, not by visitation（由意图�
 - **ReOutlook 维护**：邮件导出必须同时通过离线管理员签名和机主系统锁屏确认，导出文件使用 AES-256-GCM 与 RSA-OAEP 加密。
 - **ReBrowser 控制**：版本化协议支持按总标签页／子标签页 ID 执行导航、生命周期、设置、诊断、审计和有界修复；永久管理员根可独立授权全部三级操作，机主锁屏单独授权仅限一、二级。
 
-ReBrowser 管理协议还提供有界的下载策略、任务、批准、拒绝、取消、重试、删除、清理和修复命令，但不提供打开、安装或执行文件的命令。两种接口都不提供任意 JavaScript、Cookie、Token、Web Storage 或密码提取能力。参见 [管理员工具](tools/admin/README.md) 和 [ReBrowser 管理协议](docs/REBROWSER_ADMIN_CONTROL.md)。管理员私钥不包含在 APK 或公开仓库中。
+ReBrowser 管理协议还提供有界的下载策略、任务、批准、拒绝、取消、重试、删除、清理和修复命令，以及只允许查询、禁用和清除的网站权限控制；管理员不能启用网站能力或代替用户创建授权。协议不提供打开、安装或执行文件的命令。两种接口都不提供任意 JavaScript、Cookie、Token、Web Storage、剪贴板、坐标或密码提取能力。参见 [管理员工具](tools/admin/README.md) 和 [ReBrowser 管理协议](docs/REBROWSER_ADMIN_CONTROL.md)。管理员私钥不包含在 APK 或公开仓库中。
 
 ## 下载与安装
 
@@ -72,6 +74,7 @@ export ANDROID_HOME=$HOME/Android/Sdk
 | [ReOutlook 架构与同步](docs/REOUTLOOK_ARCHITECTURE.md) | 邮件采集、回填、检查点、账号隔离和离线界面 |
 | [ReBrowser 设计](docs/REBROWSER_EXPLORATION.md) | 双层标签、Profile、生命周期、方向和返回策略 |
 | [ReBrowser 管理协议](docs/REBROWSER_ADMIN_CONTROL.md) | ADB 挑战授权、命令范围和数据边界 |
+| [ReBrowser 网站权限](docs/REBROWSER_SITE_PERMISSIONS.md) | 单站授权、定位、剪贴板、永久禁用项和后台冻结 |
 | [项目状态](docs/PROJECT_STATUS.md) | 已验证能力、当前限制和后续工作 |
 | [隐私说明](PRIVACY.md) | 本地数据、网络通信、备份和删除 |
 | [安全策略](SECURITY.md) | 安全边界、管理员接口和漏洞报告 |

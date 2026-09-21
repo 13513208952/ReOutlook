@@ -1,11 +1,13 @@
 package io.github.reoutlook;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Color;
@@ -19,6 +21,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
@@ -42,6 +45,7 @@ import java.util.List;
 public final class ReBrowserActivity extends Activity
         implements ReBrowserAdminController.Host {
     private static final int FILE_CHOOSER_REQUEST = 5102;
+    private static final int WEBSITE_ANDROID_PERMISSION_REQUEST = 5103;
     private static final long DOUBLE_BACK_INTERVAL_MS = 2_000L;
 
     private List<ReBrowserStore.Workspace> workspaces = List.of();
@@ -53,6 +57,7 @@ public final class ReBrowserActivity extends Activity
 
     private ReBrowserWorkspaceController workspaceController;
     private ReBrowserPreferences browserPreferences;
+    private ReBrowserSitePermissions sitePermissions;
     private ReBrowserFavorites bookmarkStore;
     private ReBrowserDownloadController downloadController;
     private ReBrowserWebController webController;
@@ -72,6 +77,12 @@ public final class ReBrowserActivity extends Activity
     };
     private long lastBackPressAt;
     private ReBrowserFullscreenController fullscreenController;
+    private ReBrowserPermissionRequest visiblePermissionRequest;
+    private ReBrowserPermissionRequest pendingAndroidPermissionRequest;
+    private long pendingAndroidPermissionDuration;
+    private View permissionPromptView;
+    private boolean androidPermissionDialogVisible;
+    private long observedPermissionRevision;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -81,9 +92,11 @@ public final class ReBrowserActivity extends Activity
         workspaces = workspaceController.activeWorkspaces();
         shelvedSecondaryWorkspaces = workspaceController.shelvedWorkspaces();
         browserPreferences = new ReBrowserPreferences(this);
+        sitePermissions = new ReBrowserSitePermissions(this);
+        observedPermissionRevision = sitePermissions.revision();
         fullscreenController = new ReBrowserFullscreenController(this, browserPreferences);
         fullscreenController.applyGlobalOrientationPreference();
-        webController = new ReBrowserWebController(this, browserPreferences,
+        webController = new ReBrowserWebController(this, browserPreferences, sitePermissions,
                 fullscreenController, new WebListener(), FILE_CHOOSER_REQUEST);
         bookmarkStore = new ReBrowserFavorites(this);
         bookmarks.addAll(bookmarkStore.load());
@@ -95,10 +108,12 @@ public final class ReBrowserActivity extends Activity
                 this, webController, new DownloadListener());
         downloads = downloadController.records();
         adminController = new ReBrowserAdminController(
-                this, workspaceController, browserPreferences, fullscreenController,
-                webController, downloadController, this);
+                this, workspaceController, browserPreferences, sitePermissions,
+                fullscreenController, webController, downloadController, this);
 
-        if (!WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)
+                || !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+                || !WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             showUnsupportedProvider();
             adminController.handle(getIntent());
             return;
@@ -255,6 +270,7 @@ public final class ReBrowserActivity extends Activity
     @Override
     public void activateWorkspace(ReBrowserStore.Workspace workspace) {
         if (workspace == activeWorkspace() && webController.hasPages()) return;
+        dismissPermissionPrompt("workspace-switched");
         if (activeWorkspace() != null && workspace != activeWorkspace()) {
             adminController.onWorkspaceDeactivated(activeWorkspace());
         }
@@ -273,6 +289,7 @@ public final class ReBrowserActivity extends Activity
     public void showTab(ReBrowserStore.Tab tab) {
         ReBrowserStore.Workspace workspace = activeWorkspace();
         if (workspace == null || !workspace.tabs.contains(tab)) return;
+        if (workspace.activeTab() != tab) dismissPermissionPrompt("tab-switched");
         saveVisibleTabState();
         workspaceController.selectTab(workspace, tab);
         try {
@@ -283,6 +300,21 @@ public final class ReBrowserActivity extends Activity
         }
         saveWorkspaceMetadata();
         updateChromeUi();
+    }
+
+    @Override
+    public void onWebsitePermissionPolicyChanged() {
+        observedPermissionRevision = sitePermissions.revision();
+        dismissPermissionPrompt("permission-policy-changed");
+        if (webController.hasPages()) {
+            saveCurrentTabStates();
+            downloadController.invalidatePageTransfers("permission-policy-changed");
+            webController.destroyAll();
+        }
+        if (activeWorkspace() != null && activeWorkspace().activeTab() != null) {
+            showTab(activeWorkspace().activeTab());
+            webController.onResume();
+        }
     }
 
     @Override
@@ -401,20 +433,6 @@ public final class ReBrowserActivity extends Activity
         activateWorkspace(workspace);
     }
 
-    private static String safeOrigin(String value) {
-        try {
-            Uri uri = Uri.parse(value);
-            String scheme = uri.getScheme();
-            String host = uri.getHost();
-            if (scheme == null || host == null) return "";
-            return scheme.toLowerCase(java.util.Locale.ROOT) + "://"
-                    + host.toLowerCase(java.util.Locale.ROOT)
-                    + (uri.getPort() < 0 ? "" : ":" + uri.getPort());
-        } catch (RuntimeException ignored) {
-            return "";
-        }
-    }
-
     private String normalizeAddress(String input) {
         String clean = input == null ? "" : input.trim();
         if (clean.isEmpty()) return browserPreferences.homeUrl();
@@ -442,37 +460,6 @@ public final class ReBrowserActivity extends Activity
         if (overviewController.is(ReBrowserOverviewController.Page.CHILD_TABS)) showChildOverview();
     }
 
-    private void showWorkspaceSettings() {
-        if (activeWorkspace() == null || activeWorkspace().level == ReBrowserStore.Level.TEMPORARY) return;
-        List<String> actions = new ArrayList<>();
-        actions.add("重命名总标签页");
-        if (activeWorkspace().level == ReBrowserStore.Level.SECONDARY) {
-            actions.add("取消上锁并降级为临时总标签页");
-            actions.add("提升为主总标签页");
-        }
-        new AlertDialog.Builder(this)
-                .setTitle("总标签页设置")
-                .setItems(actions.toArray(new String[0]), (dialog, which) -> {
-                    if (which == 0) {
-                        showRenameDialog();
-                    } else if (which == 1) {
-                        unlockWorkspace(activeWorkspace());
-                    } else {
-                        if (workspaceController.promoteToPrimary(
-                                activeWorkspace(), false)) {
-                            toast("已提升为主总标签页");
-                            updateChromeUi();
-                            if (overviewController.is(
-                                    ReBrowserOverviewController.Page.WORKSPACES)) {
-                                showWorkspaceOverview();
-                            }
-                        }
-                    }
-                })
-                .setNegativeButton("取消", null)
-                .show();
-    }
-
     private void confirmUnlockWorkspace(ReBrowserStore.Workspace workspace) {
         new AlertDialog.Builder(this)
                 .setTitle("取消上锁？")
@@ -492,33 +479,6 @@ public final class ReBrowserActivity extends Activity
                 ReBrowserOverviewController.Page.WORKSPACE_BOOKMARKS)) {
             showWorkspaceBookmarkOverview();
         }
-    }
-
-    private void showRenameDialog() {
-        EditText input = new EditText(this);
-        input.setSingleLine(true);
-        input.setText(activeWorkspace().title);
-        input.setSelectAllOnFocus(true);
-        int padding = dp(20);
-        FrameLayout holder = new FrameLayout(this);
-        holder.setPadding(padding, 0, padding, 0);
-        holder.addView(input, matchWrap());
-        new AlertDialog.Builder(this)
-                .setTitle("重命名总标签页")
-                .setView(holder)
-                .setPositiveButton("保存", (dialog, which) -> {
-                    String value = input.getText().toString().replaceAll("\\s+", " ").trim();
-                    if (value.isEmpty()) return;
-                    workspaceController.renameActiveWorkspace(value);
-                    updateChromeUi();
-                    if (overviewController.is(ReBrowserOverviewController.Page.WORKSPACES)) showWorkspaceOverview();
-                })
-                .setNegativeButton("取消", null)
-                .show();
-    }
-
-    private void confirmCloseWorkspace() {
-        if (activeWorkspace() != null) confirmCloseWorkspace(activeWorkspace());
     }
 
     private void confirmCloseWorkspace(ReBrowserStore.Workspace workspace) {
@@ -600,6 +560,7 @@ public final class ReBrowserActivity extends Activity
     @Override
     public void deleteProfileIfPossible(String profileName) {
         if (!ReBrowserStore.isOwnedProfile(profileName)) return;
+        sitePermissions.clearForProfile(profileName);
         try {
             ProfileStore.getInstance().deleteProfile(profileName);
             workspaceController.unmarkProfileForDeletion(profileName);
@@ -613,8 +574,8 @@ public final class ReBrowserActivity extends Activity
     private void showUnsupportedProvider() {
         browserToolbar.setVisibility(View.GONE);
         TextView message = new TextView(this);
-        message.setText("当前系统 WebView 不支持 Multi-Profile。\n\n"
-                + "为保护 ReOutlook 的 Default Profile，ReBrowser 已禁用。\n\n"
+        message.setText("当前系统 WebView 不支持 ReBrowser 所需的 Multi-Profile 或网站权限策略。\n\n"
+                + "为保护 ReOutlook 的 Default Profile，并防止网页绕过权限管理，ReBrowser 已禁用。\n\n"
                 + "可以更新 Android System WebView 后重试。");
         message.setTextColor(Color.rgb(35, 39, 43));
         message.setTextSize(18);
@@ -1774,6 +1735,10 @@ public final class ReBrowserActivity extends Activity
     }
 
     private void handleSystemBack() {
+        if (visiblePermissionRequest != null) {
+            dismissPermissionPrompt("user-dismissed");
+            return;
+        }
         if (fullscreenController.hideIfVisible()) return;
         switch (overviewController.page()) {
             case CHILD_TABS:
@@ -1842,6 +1807,19 @@ public final class ReBrowserActivity extends Activity
     @Override
     protected void onResume() {
         super.onResume();
+        long currentPermissionRevision = sitePermissions.revision();
+        if (currentPermissionRevision != observedPermissionRevision) {
+            observedPermissionRevision = currentPermissionRevision;
+            dismissPermissionPrompt("permission-policy-changed");
+            if (webController.hasPages()) {
+                saveCurrentTabStates();
+                destroyTabWebViews();
+            }
+        }
+        if (activeWorkspace() != null && activeWorkspace().activeTab() != null
+                && webController.currentUrl(activeWorkspace().activeTab().id) == null) {
+            showTab(activeWorkspace().activeTab());
+        }
         webController.onResume();
         downloadController.refresh();
         if (overviewController.is(ReBrowserOverviewController.Page.DOWNLOADS)) showDownloadOverview();
@@ -1850,12 +1828,27 @@ public final class ReBrowserActivity extends Activity
     @Override
     protected void onPause() {
         saveCurrentTabStates();
-        webController.onPause();
+        if (!androidPermissionDialogVisible) {
+            dismissPermissionPrompt("application-backgrounded");
+            webController.onPause();
+        }
         super.onPause();
     }
 
     @Override
+    protected void onStop() {
+        super.onStop();
+        if (!androidPermissionDialogVisible && !sitePermissions.backgroundRuntimeEnabled()
+                && !webController.hasPendingFileChooser() && webController.hasPages()) {
+            saveCurrentTabStates();
+            downloadController.invalidatePageTransfers("background-runtime-disabled");
+            webController.destroyAll();
+        }
+    }
+
+    @Override
     protected void onDestroy() {
+        dismissPermissionPrompt("activity-destroyed");
         adminController.onDestroy();
         fullscreenController.hide();
         saveCurrentTabStates();
@@ -1873,6 +1866,174 @@ public final class ReBrowserActivity extends Activity
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         webController.onActivityResult(requestCode, resultCode, data);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode,
+            String[] permissions,
+            int[] grantResults
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != WEBSITE_ANDROID_PERMISSION_REQUEST) return;
+        androidPermissionDialogVisible = false;
+        ReBrowserPermissionRequest request = pendingAndroidPermissionRequest;
+        long duration = pendingAndroidPermissionDuration;
+        pendingAndroidPermissionRequest = null;
+        pendingAndroidPermissionDuration = 0L;
+        if (request == null || request.isCompleted()) {
+            webController.onResume();
+            return;
+        }
+        webController.onResume();
+        boolean granted = true;
+        for (String permission : request.androidPermissions) {
+            granted &= checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
+        }
+        if (granted) request.approve(duration);
+        else {
+            request.deny("android-permission-denied");
+            toast("系统未授予所需权限");
+        }
+    }
+
+    private void showSitePermissionPrompt(ReBrowserPermissionRequest request) {
+        if (request == null || request.isCompleted()) return;
+        if (visiblePermissionRequest != null && !visiblePermissionRequest.isCompleted()) {
+            request.deny("another-permission-prompt-visible");
+            return;
+        }
+        visiblePermissionRequest = request;
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(18), dp(14), dp(18), dp(14));
+        card.setBackground(roundedBackground(Color.WHITE, dp(18)));
+        card.setElevation(dp(18));
+
+        TextView title = new TextView(this);
+        title.setText(request.origin + " 想使用" + permissionNames(request.permissions));
+        title.setTextSize(16);
+        title.setTextColor(Color.rgb(31, 36, 45));
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        card.addView(title, matchWrap());
+        TextView detail = new TextView(this);
+        detail.setText("仅当前可见页面可以使用；进入后台、导航或关闭页面会立即停止。");
+        detail.setTextSize(12);
+        detail.setTextColor(Color.rgb(92, 99, 110));
+        detail.setPadding(0, dp(5), 0, dp(10));
+        card.addView(detail, matchWrap());
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        Button deny = new Button(this);
+        deny.setText("拒绝");
+        deny.setOnClickListener(view -> {
+            request.deny("user-denied");
+            removePermissionPrompt(request);
+        });
+        Button shortGrant = new Button(this);
+        shortGrant.setText(request.shortLabel);
+        shortGrant.setOnClickListener(view -> beginPermissionApproval(
+                request, request.shortDurationMs));
+        Button longGrant = new Button(this);
+        longGrant.setText(request.longLabel);
+        longGrant.setOnClickListener(view -> beginPermissionApproval(
+                request, request.longDurationMs));
+        actions.addView(deny, new LinearLayout.LayoutParams(0, dp(48), 1));
+        actions.addView(shortGrant, new LinearLayout.LayoutParams(0, dp(48), 1));
+        actions.addView(longGrant, new LinearLayout.LayoutParams(0, dp(48), 1));
+        card.addView(actions, matchWrap());
+
+        permissionPromptView = card;
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP);
+        params.setMargins(dp(12), dp(74), dp(12), 0);
+        root.addView(card, params);
+        root.postDelayed(() -> {
+            if (visiblePermissionRequest == request) {
+                request.deny("permission-timeout");
+                removePermissionPrompt(request);
+            }
+        }, 30_000L);
+    }
+
+    private void beginPermissionApproval(ReBrowserPermissionRequest request, long duration) {
+        if (request != visiblePermissionRequest || request.isCompleted()) return;
+        for (String permission : request.permissions) {
+            if (!sitePermissions.capabilityEnabled(permission)) {
+                request.deny("permission-disabled");
+                removePermissionPrompt(request);
+                return;
+            }
+        }
+        List<String> missing = new ArrayList<>();
+        for (String permission : request.androidPermissions) {
+            if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+                missing.add(permission);
+            }
+        }
+        // Android 12+ ignores a fine-location upgrade requested without coarse location in
+        // the same array, even when coarse location was already granted earlier.
+        if (missing.contains(Manifest.permission.ACCESS_FINE_LOCATION)
+                && !missing.contains(Manifest.permission.ACCESS_COARSE_LOCATION)) {
+            missing.add(0, Manifest.permission.ACCESS_COARSE_LOCATION);
+        }
+        removePermissionPrompt(request);
+        if (missing.isEmpty()) {
+            request.approve(duration);
+            return;
+        }
+        pendingAndroidPermissionRequest = request;
+        pendingAndroidPermissionDuration = duration;
+        androidPermissionDialogVisible = true;
+        webController.pauseForAndroidPermissionDialog();
+        try {
+            requestPermissions(missing.toArray(new String[0]),
+                    WEBSITE_ANDROID_PERMISSION_REQUEST);
+        } catch (RuntimeException error) {
+            androidPermissionDialogVisible = false;
+            pendingAndroidPermissionRequest = null;
+            pendingAndroidPermissionDuration = 0L;
+            webController.onResume();
+            request.deny("android-permission-request-failed");
+        }
+    }
+
+    private void dismissPermissionPrompt(String reason) {
+        if (visiblePermissionRequest != null) visiblePermissionRequest.deny(reason);
+        removePermissionPrompt(visiblePermissionRequest);
+        if (!androidPermissionDialogVisible && pendingAndroidPermissionRequest != null) {
+            pendingAndroidPermissionRequest.deny(reason);
+            pendingAndroidPermissionRequest = null;
+            pendingAndroidPermissionDuration = 0L;
+        }
+    }
+
+    private void removePermissionPrompt(ReBrowserPermissionRequest request) {
+        if (request != null && visiblePermissionRequest != request) return;
+        if (permissionPromptView != null && permissionPromptView.getParent() == root) {
+            root.removeView(permissionPromptView);
+        }
+        permissionPromptView = null;
+        visiblePermissionRequest = null;
+    }
+
+    private static String permissionNames(List<String> permissions) {
+        List<String> values = new ArrayList<>();
+        for (String permission : permissions) {
+            if (ReBrowserSitePermissions.CAMERA.equals(permission)) values.add("摄像头");
+            else if (ReBrowserSitePermissions.MICROPHONE.equals(permission)) values.add("麦克风");
+            else if (ReBrowserSitePermissions.PRECISE_LOCATION.equals(permission)) {
+                values.add("高精度定位");
+            } else if (ReBrowserSitePermissions.APPROXIMATE_LOCATION.equals(permission)) {
+                values.add("模糊定位");
+            } else if (ReBrowserSitePermissions.CLIPBOARD.equals(permission)) {
+                values.add("剪贴板");
+            }
+        }
+        return String.join("和", values);
     }
 
     private void confirmExternalNavigation(Uri uri, String scheme) {
@@ -1900,6 +2061,10 @@ public final class ReBrowserActivity extends Activity
     private final class WebListener implements ReBrowserWebController.Listener {
         @Override
         public void onPageStarted(ReBrowserStore.Tab tab, String url, boolean visible) {
+            if (visiblePermissionRequest != null
+                    && visiblePermissionRequest.tabId.equals(tab.id)) {
+                dismissPermissionPrompt("page-navigated");
+            }
             workspaceController.updateTab(tab, url, null);
             adminController.onPageStarted(tab);
             if (visible) {
@@ -2014,6 +2179,11 @@ public final class ReBrowserActivity extends Activity
         @Override
         public void onFileChooserUnavailable() {
             toast("没有可用的文件选择器");
+        }
+
+        @Override
+        public void onSitePermissionRequested(ReBrowserPermissionRequest request) {
+            showSitePermissionPrompt(request);
         }
     }
 

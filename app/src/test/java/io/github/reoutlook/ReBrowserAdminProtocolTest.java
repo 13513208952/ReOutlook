@@ -42,6 +42,12 @@ public final class ReBrowserAdminProtocolTest {
                 ReBrowserAdminProtocol.OP_REPAIR_DOWNLOADS));
         assertEquals(3, ReBrowserAdminProtocol.authorizationLevel(
                 ReBrowserAdminProtocol.OP_CLEAR_DOWNLOADS));
+        assertEquals(1, ReBrowserAdminProtocol.authorizationLevel(
+                ReBrowserAdminProtocol.OP_GET_SITE_PERMISSIONS));
+        assertEquals(2, ReBrowserAdminProtocol.authorizationLevel(
+                ReBrowserAdminProtocol.OP_DISABLE_SITE_PERMISSION));
+        assertEquals(3, ReBrowserAdminProtocol.authorizationLevel(
+                ReBrowserAdminProtocol.OP_CLEAR_SITE_PERMISSION_GRANTS));
 
         JSONObject levelTwo = prepared(ReBrowserAdminProtocol.OP_SET_DOWNLOAD_POLICY)
                 .put("downloadsEnabled", true);
@@ -72,6 +78,25 @@ public final class ReBrowserAdminProtocolTest {
         assertThrows(SecurityException.class, () -> ReBrowserAdminProtocol.prepareExternalRequest(
                 prepared(ReBrowserAdminProtocol.OP_SET_PREFERENCE)
                         .put("name", "arbitraryScript").put("value", "alert(1)")));
+        assertThrows(SecurityException.class, () -> ReBrowserAdminProtocol.prepareExternalRequest(
+                prepared(ReBrowserAdminProtocol.OP_DISABLE_SITE_PERMISSION)
+                        .put("permission", "enable-camera")));
+        assertThrows(SecurityException.class, () -> ReBrowserAdminProtocol.prepareExternalRequest(
+                prepared(ReBrowserAdminProtocol.OP_DISABLE_SITE_PERMISSION)));
+        assertThrows(SecurityException.class, () -> ReBrowserAdminProtocol.prepareExternalRequest(
+                prepared(ReBrowserAdminProtocol.OP_CLEAR_SITE_PERMISSION_GRANTS)));
+
+        JSONObject disablePermission = prepared(
+                ReBrowserAdminProtocol.OP_DISABLE_SITE_PERMISSION)
+                .put("permission", ReBrowserSitePermissions.CAMERA);
+        ReBrowserAdminProtocol.prepareExternalRequest(disablePermission);
+        assertEquals(2, disablePermission.getInt("authorizationLevel"));
+        JSONObject clearPermissions = prepared(
+                ReBrowserAdminProtocol.OP_CLEAR_SITE_PERMISSION_GRANTS)
+                .put("permission", ReBrowserSitePermissions.CLIPBOARD)
+                .put("confirmDelete", true);
+        ReBrowserAdminProtocol.prepareExternalRequest(clearPermissions);
+        assertEquals(3, clearPermissions.getInt("authorizationLevel"));
 
         JSONObject valid = prepared(ReBrowserAdminProtocol.OP_CLOSE_WORKSPACE)
                 .put("workspaceId", id('b')).put("confirmDelete", true);
@@ -99,6 +124,15 @@ public final class ReBrowserAdminProtocolTest {
         assertEquals(ReBrowserAdminProtocol.OP_REPAIR_STATE,
                 ReBrowserAdminAuthorizer.inspectPending(context, repairChallenge)
                         .getString("operation"));
+
+        JSONObject clearPermissions = prepared(
+                ReBrowserAdminProtocol.OP_CLEAR_SITE_PERMISSION_GRANTS)
+                .put("confirmDelete", true);
+        String clearChallenge = ReBrowserAdminAuthorizer.createChallenge(
+                context, ReBrowserAdminProtocol.encode(clearPermissions.toString()));
+        assertThrows(SecurityException.class,
+                () -> ReBrowserAdminAuthorizer.authorizeWithOwnerCredential(
+                        context, clearChallenge));
     }
 
     @Test
