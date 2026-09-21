@@ -58,8 +58,8 @@ public final class ReBrowserActivity extends Activity {
     private List<ReBrowserStore.Workspace> shelvedSecondaryWorkspaces = List.of();
     private final List<ReBrowserFavorites.Favorite> bookmarks = new ArrayList<>();
     private List<ReBrowserDownloads.Record> downloads = List.of();
-    private final Set<String> selectedWorkspaceIds = new java.util.HashSet<>();
-    private final Set<String> selectedChildTabIds = new java.util.HashSet<>();
+    private final ReBrowserOverviewController overviewController =
+            new ReBrowserOverviewController();
     private final Map<String, Integer> tabLoadProgress = new HashMap<>();
     private final Map<String, String> tabLastErrors = new HashMap<>();
     private final Set<String> loadingTabIds = new java.util.HashSet<>();
@@ -77,18 +77,12 @@ public final class ReBrowserActivity extends Activity {
     private TextView workspaceCountButton;
     private ProgressBar progressBar;
     private FrameLayout overviewContainer;
-    private boolean workspaceOverviewVisible;
-    private boolean childOverviewVisible;
-    private boolean bookmarkOverviewVisible;
-    private boolean workspaceBookmarkOverviewVisible;
-    private boolean downloadOverviewVisible;
     private final Runnable downloadRefreshRunnable = () -> {
-        if (!downloadOverviewVisible || root == null) return;
+        if (!overviewController.is(ReBrowserOverviewController.Page.DOWNLOADS)
+                || root == null) return;
         downloadController.refresh();
         showDownloadOverview();
     };
-    private boolean workspaceSelectionMode;
-    private boolean childSelectionMode;
     private long lastBackPressAt;
     private ReBrowserFullscreenController fullscreenController;
 
@@ -235,7 +229,10 @@ public final class ReBrowserActivity extends Activity {
                 .setPositiveButton("移出并删除", (dialog, which) -> {
                     workspaceController.deleteShelvedSecondary(workspace);
                     deleteProfileIfPossible(workspace.profileName);
-                    if (workspaceBookmarkOverviewVisible) showWorkspaceBookmarkOverview();
+                    if (overviewController.is(
+                            ReBrowserOverviewController.Page.WORKSPACE_BOOKMARKS)) {
+                        showWorkspaceBookmarkOverview();
+                    }
                 })
                 .setNegativeButton("取消", null)
                 .show();
@@ -344,7 +341,7 @@ public final class ReBrowserActivity extends Activity {
                     ? "收藏数量已达到上限" : "当前页面不能收藏");
             return;
         }
-        if (bookmarkOverviewVisible) showBookmarkOverview();
+        if (overviewController.is(ReBrowserOverviewController.Page.FAVORITES)) showBookmarkOverview();
         toast("已添加到收藏栏");
     }
 
@@ -382,7 +379,7 @@ public final class ReBrowserActivity extends Activity {
                 .setMessage(bookmark.title + "\n" + displayUrl(bookmark.url))
                 .setPositiveButton("删除", (dialog, which) -> {
                     bookmarkStore.remove(bookmarks, bookmark);
-                    if (bookmarkOverviewVisible) showBookmarkOverview();
+                    if (overviewController.is(ReBrowserOverviewController.Page.FAVORITES)) showBookmarkOverview();
                 })
                 .setNegativeButton("取消", null)
                 .show();
@@ -1100,7 +1097,7 @@ public final class ReBrowserActivity extends Activity {
             if (result.nextActiveTab != null) showTab(result.nextActiveTab);
         }
         updateChromeUi();
-        if (childOverviewVisible) showChildOverview();
+        if (overviewController.is(ReBrowserOverviewController.Page.CHILD_TABS)) showChildOverview();
     }
 
     private void showWorkspaceSettings() {
@@ -1123,7 +1120,10 @@ public final class ReBrowserActivity extends Activity {
                                 activeWorkspace(), false)) {
                             toast("已提升为主总标签页");
                             updateChromeUi();
-                            if (workspaceOverviewVisible) showWorkspaceOverview();
+                            if (overviewController.is(
+                                    ReBrowserOverviewController.Page.WORKSPACES)) {
+                                showWorkspaceOverview();
+                            }
                         }
                     }
                 })
@@ -1145,8 +1145,11 @@ public final class ReBrowserActivity extends Activity {
         if (!workspaceController.unlockToTemporary(workspace)) return;
         toast("已移出书签栏；关闭后将清除此临时总标签页");
         updateChromeUi();
-        if (workspaceOverviewVisible) showWorkspaceOverview();
-        if (workspaceBookmarkOverviewVisible) showWorkspaceBookmarkOverview();
+        if (overviewController.is(ReBrowserOverviewController.Page.WORKSPACES)) showWorkspaceOverview();
+        if (overviewController.is(
+                ReBrowserOverviewController.Page.WORKSPACE_BOOKMARKS)) {
+            showWorkspaceBookmarkOverview();
+        }
     }
 
     private void showRenameDialog() {
@@ -1166,7 +1169,7 @@ public final class ReBrowserActivity extends Activity {
                     if (value.isEmpty()) return;
                     workspaceController.renameActiveWorkspace(value);
                     updateChromeUi();
-                    if (workspaceOverviewVisible) showWorkspaceOverview();
+                    if (overviewController.is(ReBrowserOverviewController.Page.WORKSPACES)) showWorkspaceOverview();
                 })
                 .setNegativeButton("取消", null)
                 .show();
@@ -1215,7 +1218,7 @@ public final class ReBrowserActivity extends Activity {
         if (wasActive) {
             activateWorkspace(activeWorkspace());
             hideOverview();
-        } else if (workspaceOverviewVisible) {
+        } else if (overviewController.is(ReBrowserOverviewController.Page.WORKSPACES)) {
             showWorkspaceOverview();
         }
         updateChromeUi();
@@ -1517,8 +1520,11 @@ public final class ReBrowserActivity extends Activity {
 
     private void refreshLifecycleUi() {
         updateChromeUi();
-        if (workspaceOverviewVisible) showWorkspaceOverview();
-        if (workspaceBookmarkOverviewVisible) showWorkspaceBookmarkOverview();
+        if (overviewController.is(ReBrowserOverviewController.Page.WORKSPACES)) showWorkspaceOverview();
+        if (overviewController.is(
+                ReBrowserOverviewController.Page.WORKSPACE_BOOKMARKS)) {
+            showWorkspaceBookmarkOverview();
+        }
     }
 
     private LinearLayout createWorkspaceBatchBar() {
@@ -1539,7 +1545,7 @@ public final class ReBrowserActivity extends Activity {
                 this::batchLockSelectedWorkspaces));
         actions.addView(batchButton("解锁", !primarySelected && hasSecondary,
                 this::batchUnlockSelectedWorkspaces));
-        actions.addView(batchButton("关闭", !primarySelected && !selectedWorkspaceIds.isEmpty(),
+        actions.addView(batchButton("关闭", !primarySelected && overviewController.hasWorkspaceSelection(),
                 this::confirmBatchCloseWorkspaces));
         bar.addView(actions, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
@@ -1575,7 +1581,7 @@ public final class ReBrowserActivity extends Activity {
     private List<ReBrowserStore.Workspace> selectedWorkspaces() {
         List<ReBrowserStore.Workspace> selected = new ArrayList<>();
         for (ReBrowserStore.Workspace workspace : workspaces) {
-            if (selectedWorkspaceIds.contains(workspace.id)) selected.add(workspace);
+            if (overviewController.isWorkspaceSelected(workspace.id)) selected.add(workspace);
         }
         return selected;
     }
@@ -1588,21 +1594,17 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void toggleWorkspaceSelection(ReBrowserStore.Workspace workspace) {
-        workspaceSelectionMode = true;
-        if (!selectedWorkspaceIds.add(workspace.id)) selectedWorkspaceIds.remove(workspace.id);
-        if (selectedWorkspaceIds.isEmpty()) workspaceSelectionMode = false;
+        overviewController.toggleWorkspaceSelection(workspace.id);
         showWorkspaceOverview();
     }
 
     private void startWorkspaceSelection(ReBrowserStore.Workspace workspace) {
-        workspaceSelectionMode = true;
-        selectedWorkspaceIds.add(workspace.id);
+        overviewController.startWorkspaceSelection(workspace.id);
         showWorkspaceOverview();
     }
 
     private void exitWorkspaceSelection() {
-        workspaceSelectionMode = false;
-        selectedWorkspaceIds.clear();
+        overviewController.clearWorkspaceSelection();
         showWorkspaceOverview();
     }
 
@@ -1612,8 +1614,7 @@ public final class ReBrowserActivity extends Activity {
         for (ReBrowserStore.Workspace workspace : selectedWorkspaces()) {
             if (workspaceController.lockAsSecondary(workspace)) changed++;
         }
-        workspaceSelectionMode = false;
-        selectedWorkspaceIds.clear();
+        overviewController.clearWorkspaceSelection();
         toast("已上锁 " + changed + " 个总标签页");
         updateChromeUi();
         showWorkspaceOverview();
@@ -1625,15 +1626,14 @@ public final class ReBrowserActivity extends Activity {
         for (ReBrowserStore.Workspace workspace : selectedWorkspaces()) {
             if (workspaceController.unlockToTemporary(workspace)) changed++;
         }
-        workspaceSelectionMode = false;
-        selectedWorkspaceIds.clear();
+        overviewController.clearWorkspaceSelection();
         toast("已解锁 " + changed + " 个总标签页");
         updateChromeUi();
         showWorkspaceOverview();
     }
 
     private void confirmBatchCloseWorkspaces() {
-        if (selectedWorkspacesContainPrimary() || selectedWorkspaceIds.isEmpty()) return;
+        if (selectedWorkspacesContainPrimary() || !overviewController.hasWorkspaceSelection()) return;
         new AlertDialog.Builder(this)
                 .setTitle("关闭选中的总标签页？")
                 .setMessage("临时总标签页会被清除；副总标签页会收起并保留在书签栏。")
@@ -1662,22 +1662,15 @@ public final class ReBrowserActivity extends Activity {
         if (activeClosing) {
             activateWorkspace(activeWorkspace());
         }
-        workspaceSelectionMode = false;
-        selectedWorkspaceIds.clear();
+        overviewController.clearWorkspaceSelection();
         updateChromeUi();
         showWorkspaceOverview();
     }
 
     private void showWorkspaceOverview() {
         if (activeWorkspace() == null) return;
-        childSelectionMode = false;
-        selectedChildTabIds.clear();
+        overviewController.show(ReBrowserOverviewController.Page.WORKSPACES);
         saveCurrentTabStates();
-        workspaceOverviewVisible = true;
-        childOverviewVisible = false;
-        bookmarkOverviewVisible = false;
-        workspaceBookmarkOverviewVisible = false;
-        downloadOverviewVisible = false;
         setBrowserContentVisible(false);
         overviewContainer.removeAllViews();
         overviewContainer.addView(createWorkspaceOverviewPage(), matchMatch());
@@ -1688,14 +1681,14 @@ public final class ReBrowserActivity extends Activity {
 
     private View createWorkspaceOverviewPage() {
         LinearLayout page = overviewPage("总标签页",
-                workspaceSelectionMode
-                        ? "已选择 " + selectedWorkspaceIds.size() + " 个"
+                overviewController.hasWorkspaceSelection()
+                        ? "已选择 " + overviewController.selectedWorkspaceCount() + " 个"
                         : workspaces.size() + " 个独立浏览空间",
-                workspaceSelectionMode ? null : this::createTemporaryWorkspace,
-                workspaceSelectionMode ? this::exitWorkspaceSelection : this::hideOverview,
-                workspaceSelectionMode ? "退出多选" : "返回网页");
+                overviewController.hasWorkspaceSelection() ? null : this::createTemporaryWorkspace,
+                overviewController.hasWorkspaceSelection() ? this::exitWorkspaceSelection : this::hideOverview,
+                overviewController.hasWorkspaceSelection() ? "退出多选" : "返回网页");
         LinearLayout body = (LinearLayout) ((ScrollView) page.getChildAt(1)).getChildAt(0);
-        if (workspaceSelectionMode) body.addView(createWorkspaceBatchBar());
+        if (overviewController.hasWorkspaceSelection()) body.addView(createWorkspaceBatchBar());
         GridLayout grid = new GridLayout(this);
         grid.setColumnCount(2);
         grid.setPadding(dp(8), dp(4), dp(8), dp(28));
@@ -1705,7 +1698,7 @@ public final class ReBrowserActivity extends Activity {
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(dp(14), dp(12), dp(12), dp(10));
-            boolean selected = selectedWorkspaceIds.contains(workspace.id);
+            boolean selected = overviewController.isWorkspaceSelected(workspace.id);
             card.setElevation(selected || workspace == activeWorkspace() ? dp(6) : dp(2));
             GradientDrawable background = roundedBackground(
                     selected ? Color.rgb(224, 218, 249)
@@ -1718,7 +1711,7 @@ public final class ReBrowserActivity extends Activity {
             }
             card.setBackground(background);
             card.setOnClickListener(view -> {
-                if (workspaceSelectionMode) {
+                if (overviewController.hasWorkspaceSelection()) {
                     toggleWorkspaceSelection(workspace);
                 } else {
                     activateWorkspace(workspace);
@@ -1743,7 +1736,7 @@ public final class ReBrowserActivity extends Activity {
             View headingSpace = new View(this);
             heading.addView(headingSpace, new LinearLayout.LayoutParams(0, 1, 1));
             boolean primary = workspace.level == ReBrowserStore.Level.PRIMARY;
-            if (!workspaceSelectionMode && !primary) {
+            if (!overviewController.hasWorkspaceSelection() && !primary) {
                 boolean temporary = workspace.level == ReBrowserStore.Level.TEMPORARY;
                 TextView lock = toolbarButton("",
                         temporary ? "上锁为副总标签页" : "取消上锁");
@@ -1764,7 +1757,7 @@ public final class ReBrowserActivity extends Activity {
                 });
                 heading.addView(lock, new LinearLayout.LayoutParams(dp(44), dp(34)));
             }
-            if (!workspaceSelectionMode) {
+            if (!overviewController.hasWorkspaceSelection()) {
                 TextView close = toolbarButton(primary ? "◆" : "×",
                         primary ? "主总标签页不可关闭" : "关闭总标签页 " + workspace.title);
                 if (primary) {
@@ -1820,32 +1813,28 @@ public final class ReBrowserActivity extends Activity {
         LinearLayout bar = new LinearLayout(this);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setPadding(dp(12), dp(10), dp(12), dp(8));
-        bar.addView(batchButton("关闭选中子标签页", !selectedChildTabIds.isEmpty(),
+        bar.addView(batchButton("关闭选中子标签页", overviewController.hasChildSelection(),
                 this::confirmBatchCloseChildTabs));
         return bar;
     }
 
     private void toggleChildTabSelection(ReBrowserStore.Tab tab) {
-        childSelectionMode = true;
-        if (!selectedChildTabIds.add(tab.id)) selectedChildTabIds.remove(tab.id);
-        if (selectedChildTabIds.isEmpty()) childSelectionMode = false;
+        overviewController.toggleChildTabSelection(tab.id);
         showChildOverview();
     }
 
     private void startChildTabSelection(ReBrowserStore.Tab tab) {
-        childSelectionMode = true;
-        selectedChildTabIds.add(tab.id);
+        overviewController.startChildTabSelection(tab.id);
         showChildOverview();
     }
 
     private void exitChildSelection() {
-        childSelectionMode = false;
-        selectedChildTabIds.clear();
+        overviewController.clearChildSelection();
         showChildOverview();
     }
 
     private void confirmBatchCloseChildTabs() {
-        if (selectedChildTabIds.isEmpty()) return;
+        if (!overviewController.hasChildSelection()) return;
         new AlertDialog.Builder(this)
                 .setTitle("关闭选中的子标签页？")
                 .setMessage("关闭子标签页不会删除总标签页的网站 Profile。")
@@ -1858,26 +1847,17 @@ public final class ReBrowserActivity extends Activity {
         if (activeWorkspace() == null) return;
         List<ReBrowserStore.Tab> closing = new ArrayList<>();
         for (ReBrowserStore.Tab tab : activeWorkspace().tabs) {
-            if (selectedChildTabIds.contains(tab.id)) closing.add(tab);
+            if (overviewController.isChildTabSelected(tab.id)) closing.add(tab);
         }
-        childOverviewVisible = false;
+        overviewController.hide();
         for (ReBrowserStore.Tab tab : closing) closeTab(tab);
-        childSelectionMode = false;
-        selectedChildTabIds.clear();
-        childOverviewVisible = true;
         showChildOverview();
     }
 
     private void showChildOverview() {
         if (activeWorkspace() == null) return;
-        workspaceSelectionMode = false;
-        selectedWorkspaceIds.clear();
+        overviewController.show(ReBrowserOverviewController.Page.CHILD_TABS);
         saveCurrentTabStates();
-        childOverviewVisible = true;
-        workspaceOverviewVisible = false;
-        bookmarkOverviewVisible = false;
-        workspaceBookmarkOverviewVisible = false;
-        downloadOverviewVisible = false;
         setBrowserContentVisible(false);
         overviewContainer.removeAllViews();
         overviewContainer.addView(createChildOverviewPage(), matchMatch());
@@ -1888,14 +1868,14 @@ public final class ReBrowserActivity extends Activity {
 
     private View createChildOverviewPage() {
         LinearLayout page = overviewPage("子标签页",
-                childSelectionMode
-                        ? "已选择 " + selectedChildTabIds.size() + " 个"
+                overviewController.hasChildSelection()
+                        ? "已选择 " + overviewController.selectedChildTabCount() + " 个"
                         : "总标签页 · " + activeWorkspace().title,
-                childSelectionMode ? null : () -> createChildTab(true),
-                childSelectionMode ? this::exitChildSelection : this::showWorkspaceOverview,
-                childSelectionMode ? "退出多选" : "返回总标签页");
+                overviewController.hasChildSelection() ? null : () -> createChildTab(true),
+                overviewController.hasChildSelection() ? this::exitChildSelection : this::showWorkspaceOverview,
+                overviewController.hasChildSelection() ? "退出多选" : "返回总标签页");
         LinearLayout body = (LinearLayout) ((ScrollView) page.getChildAt(1)).getChildAt(0);
-        if (childSelectionMode) body.addView(createChildBatchBar());
+        if (overviewController.hasChildSelection()) body.addView(createChildBatchBar());
         GridLayout grid = new GridLayout(this);
         grid.setColumnCount(2);
         grid.setPadding(dp(8), dp(4), dp(8), dp(28));
@@ -1905,7 +1885,7 @@ public final class ReBrowserActivity extends Activity {
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(dp(14), dp(12), dp(10), dp(10));
-            boolean selected = selectedChildTabIds.contains(tab.id);
+            boolean selected = overviewController.isChildTabSelected(tab.id);
             boolean active = tab.id.equals(activeWorkspace().activeTabId);
             card.setElevation(selected || active ? dp(6) : dp(2));
             GradientDrawable background = roundedBackground(
@@ -1918,7 +1898,7 @@ public final class ReBrowserActivity extends Activity {
             }
             card.setBackground(background);
             card.setOnClickListener(view -> {
-                if (childSelectionMode) {
+                if (overviewController.hasChildSelection()) {
                     toggleChildTabSelection(tab);
                 } else {
                     hideOverview();
@@ -1941,7 +1921,7 @@ public final class ReBrowserActivity extends Activity {
             icon.setBackground(roundedBackground(Color.rgb(91, 70, 180), dp(16)));
             heading.addView(icon, new LinearLayout.LayoutParams(dp(32), dp(32)));
             heading.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
-            if (!childSelectionMode) {
+            if (!overviewController.hasChildSelection()) {
                 TextView close = toolbarButton("×", "关闭子标签页 " + tab.title);
                 close.setOnClickListener(view -> closeTab(tab));
                 heading.addView(close, new LinearLayout.LayoutParams(dp(36), dp(36)));
@@ -1979,11 +1959,7 @@ public final class ReBrowserActivity extends Activity {
     private void showBookmarkOverview() {
         if (activeWorkspace() == null) return;
         saveCurrentTabStates();
-        bookmarkOverviewVisible = true;
-        workspaceOverviewVisible = false;
-        childOverviewVisible = false;
-        workspaceBookmarkOverviewVisible = false;
-        downloadOverviewVisible = false;
+        overviewController.show(ReBrowserOverviewController.Page.FAVORITES);
         setBrowserContentVisible(false);
         overviewContainer.removeAllViews();
         overviewContainer.addView(createBookmarkOverviewPage(), matchMatch());
@@ -2058,11 +2034,7 @@ public final class ReBrowserActivity extends Activity {
     private void showDownloadOverview() {
         if (activeWorkspace() == null) return;
         downloadController.refresh();
-        downloadOverviewVisible = true;
-        bookmarkOverviewVisible = false;
-        workspaceBookmarkOverviewVisible = false;
-        workspaceOverviewVisible = false;
-        childOverviewVisible = false;
+        overviewController.show(ReBrowserOverviewController.Page.DOWNLOADS);
         setBrowserContentVisible(false);
         overviewContainer.removeAllViews();
         overviewContainer.addView(createDownloadOverviewPage(), matchMatch());
@@ -2218,11 +2190,7 @@ public final class ReBrowserActivity extends Activity {
     private void showWorkspaceBookmarkOverview() {
         if (activeWorkspace() == null) return;
         saveCurrentTabStates();
-        workspaceBookmarkOverviewVisible = true;
-        bookmarkOverviewVisible = false;
-        workspaceOverviewVisible = false;
-        childOverviewVisible = false;
-        downloadOverviewVisible = false;
+        overviewController.show(ReBrowserOverviewController.Page.WORKSPACE_BOOKMARKS);
         setBrowserContentVisible(false);
         overviewContainer.removeAllViews();
         overviewContainer.addView(createWorkspaceBookmarkOverviewPage(), matchMatch());
@@ -2380,15 +2348,7 @@ public final class ReBrowserActivity extends Activity {
     }
 
     private void hideOverview() {
-        workspaceOverviewVisible = false;
-        childOverviewVisible = false;
-        bookmarkOverviewVisible = false;
-        workspaceBookmarkOverviewVisible = false;
-        downloadOverviewVisible = false;
-        workspaceSelectionMode = false;
-        childSelectionMode = false;
-        selectedWorkspaceIds.clear();
-        selectedChildTabIds.clear();
+        overviewController.hide();
         overviewContainer.animate().cancel();
         overviewContainer.setVisibility(View.GONE);
         overviewContainer.removeAllViews();
@@ -2461,20 +2421,22 @@ public final class ReBrowserActivity extends Activity {
 
     private void handleSystemBack() {
         if (fullscreenController.hideIfVisible()) return;
-        if (childOverviewVisible) {
-            if (childSelectionMode) exitChildSelection();
-            else showWorkspaceOverview();
-            return;
-        }
-        if (workspaceOverviewVisible) {
-            if (workspaceSelectionMode) exitWorkspaceSelection();
-            else hideOverview();
-            return;
-        }
-        if (bookmarkOverviewVisible || workspaceBookmarkOverviewVisible
-                || downloadOverviewVisible) {
-            hideOverview();
-            return;
+        switch (overviewController.page()) {
+            case CHILD_TABS:
+                if (overviewController.hasChildSelection()) exitChildSelection();
+                else showWorkspaceOverview();
+                return;
+            case WORKSPACES:
+                if (overviewController.hasWorkspaceSelection()) exitWorkspaceSelection();
+                else hideOverview();
+                return;
+            case FAVORITES:
+            case WORKSPACE_BOOKMARKS:
+            case DOWNLOADS:
+                hideOverview();
+                return;
+            case NONE:
+                break;
         }
         if (omnibox.hasFocus()) {
             omnibox.clearFocus();
@@ -2528,7 +2490,7 @@ public final class ReBrowserActivity extends Activity {
         super.onResume();
         webController.onResume();
         downloadController.refresh();
-        if (downloadOverviewVisible) showDownloadOverview();
+        if (overviewController.is(ReBrowserOverviewController.Page.DOWNLOADS)) showDownloadOverview();
     }
 
     @Override
@@ -2757,7 +2719,10 @@ public final class ReBrowserActivity extends Activity {
     private final class DownloadListener implements ReBrowserDownloadController.Listener {
         @Override
         public void onDownloadRecordsChanged() {
-            if (downloadOverviewVisible && root != null) showDownloadOverview();
+            if (overviewController.is(ReBrowserOverviewController.Page.DOWNLOADS)
+                    && root != null) {
+                showDownloadOverview();
+            }
         }
 
         @Override
