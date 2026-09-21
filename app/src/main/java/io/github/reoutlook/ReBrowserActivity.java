@@ -36,20 +36,13 @@ import android.widget.Toast;
 import androidx.webkit.ProfileStore;
 import androidx.webkit.WebViewFeature;
 
-import org.json.JSONArray;
-import org.json.JSONObject;
-
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
 /** Multi-Profile browser workspace MVP. ReOutlook's Default Profile is never used here. */
 @SuppressLint({"ClickableViewAccessibility", "RequiresFeature", "SetJavaScriptEnabled", "SetTextI18n", "UnsafeOptInUsageError"})
-public final class ReBrowserActivity extends Activity {
-    static final String ACTION_ADMIN_COMMAND = "io.github.reoutlook.action.REBROWSER_ADMIN";
-    static final String EXTRA_ADMIN_REQUEST = "adminRequest";
+public final class ReBrowserActivity extends Activity
+        implements ReBrowserAdminController.Host {
     private static final int FILE_CHOOSER_REQUEST = 5102;
     private static final int DOWNLOAD_STORAGE_REQUEST = 5103;
     private static final long DOUBLE_BACK_INTERVAL_MS = 2_000L;
@@ -60,16 +53,13 @@ public final class ReBrowserActivity extends Activity {
     private List<ReBrowserDownloads.Record> downloads = List.of();
     private final ReBrowserOverviewController overviewController =
             new ReBrowserOverviewController();
-    private final Map<String, Integer> tabLoadProgress = new HashMap<>();
-    private final Map<String, String> tabLastErrors = new HashMap<>();
-    private final Set<String> loadingTabIds = new java.util.HashSet<>();
-    private final Map<String, JSONObject> pendingAdminLoads = new HashMap<>();
 
     private ReBrowserWorkspaceController workspaceController;
     private ReBrowserPreferences browserPreferences;
     private ReBrowserFavorites bookmarkStore;
     private ReBrowserDownloadController downloadController;
     private ReBrowserWebController webController;
+    private ReBrowserAdminController adminController;
     private FrameLayout root;
     private FrameLayout webContainer;
     private LinearLayout browserToolbar;
@@ -107,24 +97,27 @@ public final class ReBrowserActivity extends Activity {
         downloadController = new ReBrowserDownloadController(
                 this, webController, new DownloadListener());
         downloads = downloadController.records();
+        adminController = new ReBrowserAdminController(
+                this, workspaceController, browserPreferences, fullscreenController,
+                webController, downloadController, this);
 
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
             showUnsupportedProvider();
-            handleAdminCommand(getIntent());
+            adminController.handle(getIntent());
             return;
         }
 
         deletePendingProfiles();
         workspaceController.initialize(browserPreferences.homeUrl());
         activateWorkspace(activeWorkspace());
-        handleAdminCommand(getIntent());
+        adminController.handle(getIntent());
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        handleAdminCommand(intent);
+        adminController.handle(intent);
     }
 
     private FrameLayout createRoot() {
@@ -262,15 +255,11 @@ public final class ReBrowserActivity extends Activity {
         if (!omnibox.hasFocus() && activeTab != null) omnibox.setText(activeTab.url);
     }
 
-    private void activateWorkspace(ReBrowserStore.Workspace workspace) {
+    @Override
+    public void activateWorkspace(ReBrowserStore.Workspace workspace) {
         if (workspace == activeWorkspace() && webController.hasPages()) return;
         if (activeWorkspace() != null && workspace != activeWorkspace()) {
-            for (ReBrowserStore.Tab tab : activeWorkspace().tabs) {
-                JSONObject pending = pendingAdminLoads.remove(tab.id);
-                if (pending != null) {
-                    recordAdminStatus(pending, "failed", null, "workspace-deactivated");
-                }
-            }
+            adminController.onWorkspaceDeactivated(activeWorkspace());
         }
         saveCurrentTabStates();
         destroyTabWebViews();
@@ -283,7 +272,8 @@ public final class ReBrowserActivity extends Activity {
         updateChromeUi();
     }
 
-    private void showTab(ReBrowserStore.Tab tab) {
+    @Override
+    public void showTab(ReBrowserStore.Tab tab) {
         ReBrowserStore.Workspace workspace = activeWorkspace();
         if (workspace == null || !workspace.tabs.contains(tab)) return;
         saveVisibleTabState();
@@ -298,7 +288,8 @@ public final class ReBrowserActivity extends Activity {
         updateChromeUi();
     }
 
-    private void navigateActiveTab(String input) {
+    @Override
+    public void navigateActiveTab(String input) {
         ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
         if (tab == null) return;
         String url = normalizeAddress(input);
@@ -413,650 +404,6 @@ public final class ReBrowserActivity extends Activity {
         activateWorkspace(workspace);
     }
 
-    private void handleAdminCommand(Intent intent) {
-        if (intent == null || !ACTION_ADMIN_COMMAND.equals(intent.getAction())) return;
-        intent.setAction(null); // A configuration change must not replay an authorized command.
-        JSONObject request = null;
-        try {
-            request = new JSONObject(intent.getStringExtra(EXTRA_ADMIN_REQUEST));
-            ReBrowserAdminProtocol.prepareRequest(request);
-            recordAdminStatus(request, "running", null, null);
-            JSONObject details = executeAdminRequest(request);
-            if (details != null) recordAdminStatus(request, "completed", details, null);
-        } catch (Exception error) {
-            if (request != null) {
-                recordAdminStatus(request, "failed", null,
-                        error.getClass().getSimpleName() + ":" + error.getMessage());
-            }
-        }
-    }
-
-    private JSONObject executeAdminRequest(JSONObject request) throws Exception {
-        String operation = request.getString("operation");
-        if (ReBrowserAdminProtocol.OP_GET_CAPABILITIES.equals(operation)) {
-            return createAdminCapabilities();
-        }
-        if (ReBrowserAdminProtocol.OP_GET_DIAGNOSTICS.equals(operation)) {
-            return createAdminDiagnostics();
-        }
-        if (ReBrowserAdminProtocol.OP_GET_DOWNLOAD_POLICY.equals(operation)) {
-            return createAdminDownloadPolicy();
-        }
-        if (ReBrowserAdminProtocol.OP_SET_DOWNLOAD_POLICY.equals(operation)) {
-            return setAdminDownloadPolicy(request);
-        }
-        if (ReBrowserAdminProtocol.OP_GET_DOWNLOADS.equals(operation)) {
-            return createAdminDownloads();
-        }
-        if (activeWorkspace() == null) throw new IllegalStateException("ReBrowser-disabled");
-        if (ReBrowserAdminProtocol.OP_GET_STATE.equals(operation)) return createAdminState();
-        if (ReBrowserAdminProtocol.OP_VALIDATE_STATE.equals(operation)) return validateAdminState();
-        if (ReBrowserAdminProtocol.OP_REPAIR_STATE.equals(operation)) return repairAdminState();
-        if (ReBrowserAdminProtocol.OP_NEW_WORKSPACE.equals(operation)) {
-            ReBrowserStore.Workspace workspace = workspaceController.createTemporary(
-                    browserPreferences.homeUrl());
-            if (workspace == null) throw new IllegalStateException("workspace-limit-reached");
-            hideOverview();
-            activateWorkspace(workspace);
-            return adminTargetDetails(workspace, workspace.activeTab());
-        }
-        if (ReBrowserAdminProtocol.OP_NEW_CHILD_TAB.equals(operation)) {
-            ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            activateWorkspace(workspace);
-            ReBrowserStore.Tab tab = workspaceController.addTab(
-                    workspace, browserPreferences.homeUrl());
-            if (tab == null) throw new IllegalStateException("child-tab-limit-reached");
-            hideOverview();
-            showTab(tab);
-            return adminTargetDetails(workspace, tab);
-        }
-        if (ReBrowserAdminProtocol.OP_SHOW_WORKSPACES.equals(operation)) {
-            showWorkspaceOverview();
-            return new JSONObject().put("view", "workspaces");
-        }
-        if (ReBrowserAdminProtocol.OP_SHOW_CHILD_TABS.equals(operation)) {
-            showChildOverview();
-            return new JSONObject().put("view", "tabs");
-        }
-        if (ReBrowserAdminProtocol.OP_OPEN_SETTINGS.equals(operation)) {
-            startActivity(new Intent(this, ReBrowserSettingsActivity.class));
-            return new JSONObject().put("view", "settings");
-        }
-        if (ReBrowserAdminProtocol.OP_SHOW_DOWNLOADS.equals(operation)) {
-            showDownloadOverview();
-            return new JSONObject().put("view", "downloads");
-        }
-        if (ReBrowserAdminProtocol.OP_ACTIVATE_WORKSPACE.equals(operation)) {
-            ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            hideOverview();
-            activateWorkspace(workspace);
-            return adminTargetDetails(workspace, workspace.activeTab());
-        }
-        if (ReBrowserAdminProtocol.OP_ACTIVATE_TAB.equals(operation)) {
-            return activateAdminTarget(request);
-        }
-        if (ReBrowserAdminProtocol.OP_SET_PREFERENCE.equals(operation)) {
-            return setAdminPreference(request);
-        }
-        if (ReBrowserAdminProtocol.OP_ASSERT_LOCATION.equals(operation)) {
-            ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            ReBrowserStore.Tab tab = requireAdminTab(workspace, request);
-            String currentUrl = webController.currentUrl(tab.id);
-            String actual = currentUrl == null ? tab.url : currentUrl;
-            return adminTargetDetails(workspace, tab)
-                    .put("matches", samePage(actual, request.getString("url")))
-                    .put("origin", safeOrigin(actual));
-        }
-        if (isAdminNavigationOperation(operation)) return executeAdminNavigation(request);
-        if (ReBrowserAdminProtocol.OP_LOCK_SECONDARY.equals(operation)) {
-            ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            if (!workspaceController.lockAsSecondary(workspace)) {
-                throw new IllegalStateException("workspace-cannot-lock");
-            }
-            refreshLifecycleUi();
-            return adminTargetDetails(workspace, workspace.activeTab());
-        }
-        if (ReBrowserAdminProtocol.OP_UNLOCK_TEMPORARY.equals(operation)) {
-            ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            if (!workspaceController.unlockToTemporary(workspace)) {
-                throw new IllegalStateException("workspace-cannot-unlock");
-            }
-            refreshLifecycleUi();
-            return adminTargetDetails(workspace, workspace.activeTab());
-        }
-        if (ReBrowserAdminProtocol.OP_PROMOTE_PRIMARY.equals(operation)) {
-            ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            if (!workspaceController.promoteToPrimary(
-                    workspace, browserPreferences.forcePrimaryPromotionEnabled())) {
-                throw new IllegalStateException("workspace-cannot-promote");
-            }
-            refreshLifecycleUi();
-            return adminTargetDetails(workspace, workspace.activeTab());
-        }
-        if (ReBrowserAdminProtocol.OP_DEMOTE_SECONDARY.equals(operation)) {
-            ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            if (!workspaceController.demotePrimaryToSecondary(workspace)) {
-                throw new IllegalStateException("workspace-cannot-demote");
-            }
-            refreshLifecycleUi();
-            return adminTargetDetails(workspace, workspace.activeTab());
-        }
-        if (ReBrowserAdminProtocol.OP_SHELVE_WORKSPACE.equals(operation)) {
-            ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            if (workspace.level != ReBrowserStore.Level.SECONDARY) {
-                throw new IllegalStateException("only-secondary-can-shelve");
-            }
-            String workspaceId = workspace.id;
-            closeWorkspace(workspace);
-            return new JSONObject().put("workspaceId", workspaceId).put("shelved", true);
-        }
-        if (ReBrowserAdminProtocol.OP_RESTORE_WORKSPACE.equals(operation)) {
-            ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, true);
-            if (!workspaceController.restoreSecondary(workspace)) {
-                throw new IllegalStateException("workspace-cannot-restore");
-            }
-            hideOverview();
-            activateWorkspace(workspace);
-            return adminTargetDetails(workspace, workspace.activeTab()).put("restored", true);
-        }
-        if (ReBrowserAdminProtocol.OP_CLOSE_WORKSPACE.equals(operation)) {
-            ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            if (workspace.level == ReBrowserStore.Level.PRIMARY) {
-                throw new IllegalStateException("primary-workspace-cannot-close");
-            }
-            String workspaceId = workspace.id;
-            boolean shelved = workspace.level == ReBrowserStore.Level.SECONDARY;
-            closeWorkspace(workspace);
-            return new JSONObject().put("workspaceId", workspaceId)
-                    .put("closed", true).put("shelved", shelved);
-        }
-        if (ReBrowserAdminProtocol.OP_CLOSE_TAB.equals(operation)) {
-            ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-            ReBrowserStore.Tab tab = requireAdminTab(workspace, request);
-            activateWorkspace(workspace);
-            showTab(tab);
-            String tabId = tab.id;
-            closeTab(tab);
-            return new JSONObject().put("workspaceId", workspace.id)
-                    .put("tabId", tabId).put("closed", true);
-        }
-        if (ReBrowserAdminProtocol.OP_APPROVE_DOWNLOAD.equals(operation)) {
-            ReBrowserDownloads.Record record = requireAdminDownload(request);
-            downloadController.approve(record);
-            return adminDownloadDetails(record);
-        }
-        if (ReBrowserAdminProtocol.OP_REJECT_DOWNLOAD.equals(operation)) {
-            ReBrowserDownloads.Record record = requireAdminDownload(request);
-            downloadController.reject(record);
-            return adminDownloadDetails(record);
-        }
-        if (ReBrowserAdminProtocol.OP_CANCEL_DOWNLOAD.equals(operation)) {
-            ReBrowserDownloads.Record record = requireAdminDownload(request);
-            if (!ReBrowserDownloads.STATUS_DOWNLOADING.equals(record.status)) {
-                throw new IllegalStateException("download-not-running");
-            }
-            downloadController.cancel(record);
-            return adminDownloadDetails(record);
-        }
-        if (ReBrowserAdminProtocol.OP_RETRY_DOWNLOAD.equals(operation)) {
-            ReBrowserDownloads.Record record = requireAdminDownload(request);
-            downloadController.retry(record);
-            return adminDownloadDetails(record);
-        }
-        if (ReBrowserAdminProtocol.OP_DELETE_DOWNLOAD.equals(operation)) {
-            ReBrowserDownloads.Record record = requireAdminDownload(request);
-            downloadController.delete(record);
-            return new JSONObject().put("downloadId", record.id).put("deleted", true);
-        }
-        if (ReBrowserAdminProtocol.OP_CLEAR_DOWNLOADS.equals(operation)) {
-            return new JSONObject().put("deletedCount", downloadController.clear());
-        }
-        if (ReBrowserAdminProtocol.OP_REPAIR_DOWNLOADS.equals(operation)) {
-            return repairAdminDownloads();
-        }
-        if (ReBrowserAdminProtocol.OP_DELETE_SHELVED.equals(operation)) {
-            ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, true);
-            if (!workspaceController.deleteShelvedSecondary(workspace)) {
-                throw new IllegalStateException("shelved-workspace-not-found");
-            }
-            deleteProfileIfPossible(workspace.profileName);
-            return new JSONObject().put("workspaceId", workspace.id).put("deleted", true);
-        }
-        throw new IllegalArgumentException("unsupported-operation");
-    }
-
-    private JSONObject executeAdminNavigation(JSONObject request) throws Exception {
-        String operation = request.getString("operation");
-        ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-        ReBrowserStore.Tab tab = requireAdminTab(workspace, request);
-        hideOverview();
-        activateWorkspace(workspace);
-        showTab(tab);
-        if (webController.currentUrl(tab.id) == null) {
-            throw new IllegalStateException("webview-unavailable");
-        }
-        webController.stop(tab.id);
-        if (ReBrowserAdminProtocol.OP_GO_BACK.equals(operation)
-                && !webController.canGoBack(tab.id)) {
-            throw new IllegalStateException("no-back-history");
-        }
-        if (ReBrowserAdminProtocol.OP_GO_FORWARD.equals(operation)
-                && !webController.canGoForward(tab.id)) {
-            throw new IllegalStateException("no-forward-history");
-        }
-        if (request.optBoolean("waitForLoad", false)
-                && !ReBrowserAdminProtocol.OP_STOP.equals(operation)) {
-            queueAdminLoadWait(request, tab);
-        }
-        if (ReBrowserAdminProtocol.OP_OPEN_URL.equals(operation)) {
-            navigateActiveTab(request.getString("url"));
-        } else if (ReBrowserAdminProtocol.OP_RELOAD.equals(operation)) {
-            webController.stop(tab.id);
-            webController.reload(tab.id);
-        } else if (ReBrowserAdminProtocol.OP_STOP.equals(operation)) {
-            webController.stop(tab.id);
-            loadingTabIds.remove(tab.id);
-            JSONObject pending = pendingAdminLoads.remove(tab.id);
-            if (pending != null) {
-                recordAdminStatus(pending, "failed", null, "navigation-stopped");
-            }
-        } else if (ReBrowserAdminProtocol.OP_GO_BACK.equals(operation)) {
-            webController.goBack(tab.id);
-        } else if (ReBrowserAdminProtocol.OP_GO_FORWARD.equals(operation)) {
-            webController.goForward(tab.id);
-        } else if (ReBrowserAdminProtocol.OP_GO_HOME.equals(operation)) {
-            navigateActiveTab(browserPreferences.homeUrl());
-        }
-        if (request.optBoolean("waitForLoad", false)
-                && !ReBrowserAdminProtocol.OP_STOP.equals(operation)) return null;
-        return adminTargetDetails(workspace, tab)
-                .put("origin", safeOrigin(tab.url))
-                .put("navigationDispatched", true);
-    }
-
-    private boolean isAdminNavigationOperation(String operation) {
-        return ReBrowserAdminProtocol.OP_OPEN_URL.equals(operation)
-                || ReBrowserAdminProtocol.OP_RELOAD.equals(operation)
-                || ReBrowserAdminProtocol.OP_STOP.equals(operation)
-                || ReBrowserAdminProtocol.OP_GO_BACK.equals(operation)
-                || ReBrowserAdminProtocol.OP_GO_FORWARD.equals(operation)
-                || ReBrowserAdminProtocol.OP_GO_HOME.equals(operation);
-    }
-
-    private JSONObject activateAdminTarget(JSONObject request) throws Exception {
-        ReBrowserStore.Workspace workspace = requireAdminWorkspace(request, false);
-        ReBrowserStore.Tab tab = requireAdminTab(workspace, request);
-        hideOverview();
-        activateWorkspace(workspace);
-        showTab(tab);
-        return adminTargetDetails(workspace, tab);
-    }
-
-    private ReBrowserStore.Workspace requireAdminWorkspace(
-            JSONObject request,
-            boolean shelvedOnly
-    ) {
-        String workspaceId = request.optString("workspaceId", "");
-        if (workspaceId.isBlank() && request.has("tabId")) {
-            String tabId = request.optString("tabId");
-            for (ReBrowserStore.Workspace workspace : workspaces) {
-                for (ReBrowserStore.Tab tab : workspace.tabs) {
-                    if (tab.id.equals(tabId)) return workspace;
-                }
-            }
-        }
-        if (workspaceId.isBlank() && !shelvedOnly) return activeWorkspace();
-        List<ReBrowserStore.Workspace> source = shelvedOnly
-                ? shelvedSecondaryWorkspaces : workspaces;
-        for (ReBrowserStore.Workspace workspace : source) {
-            if (workspace.id.equals(workspaceId)) return workspace;
-        }
-        throw new IllegalStateException("workspace-not-found");
-    }
-
-    private ReBrowserStore.Tab requireAdminTab(
-            ReBrowserStore.Workspace workspace,
-            JSONObject request
-    ) {
-        String tabId = request.optString("tabId", "");
-        if (tabId.isBlank()) {
-            ReBrowserStore.Tab tab = workspace.activeTab();
-            if (tab != null) return tab;
-        } else {
-            for (ReBrowserStore.Tab tab : workspace.tabs) {
-                if (tab.id.equals(tabId)) return tab;
-            }
-        }
-        throw new IllegalStateException("tab-not-found");
-    }
-
-    private JSONObject setAdminPreference(JSONObject request) throws Exception {
-        String name = request.getString("name");
-        Object value = request.get("value");
-        if ("searchEngine".equals(name)) {
-            browserPreferences.setSearchEngine((String) value);
-        } else if ("javascript".equals(name)) {
-            browserPreferences.setJavascriptEnabled((Boolean) value);
-        } else if ("thirdPartyCookies".equals(name)) {
-            browserPreferences.setThirdPartyCookiesEnabled((Boolean) value);
-        } else if ("desktopMode".equals(name)) {
-            browserPreferences.setDesktopModeEnabled((Boolean) value);
-        } else if ("forcePrimaryPromotion".equals(name)) {
-            browserPreferences.setForcePrimaryPromotionEnabled((Boolean) value);
-        } else if ("globalOrientation".equals(name)) {
-            browserPreferences.setGlobalOrientation((String) value);
-            if (!fullscreenController.isFullscreen()) {
-                fullscreenController.applyGlobalOrientationPreference();
-            }
-        } else if ("videoOrientationOverride".equals(name)) {
-            browserPreferences.setVideoOrientationOverrideEnabled((Boolean) value);
-        } else if ("videoOrientation".equals(name)) {
-            browserPreferences.setVideoOrientation((String) value);
-        } else {
-            throw new IllegalArgumentException("unsupported-preference");
-        }
-        webController.applyPreferencesToAll();
-        return new JSONObject().put("name", name).put("updated", true);
-    }
-
-    private JSONObject createAdminCapabilities() throws Exception {
-        JSONObject value = new JSONObject();
-        value.put("protocolVersion", ReBrowserAdminProtocol.VERSION);
-        value.put("operations", ReBrowserAdminProtocol.supportedOperations());
-        value.put("administratorRoots", ReBrowserAdminKeys.capabilities());
-        value.put("ownerCredentialMaximumLevel", 2);
-        value.put("rootKeyMaximumLevel", 3);
-        value.put("maxWorkspaces", ReBrowserStore.MAX_WORKSPACES);
-        value.put("maxPrimaryWorkspaces", ReBrowserStore.MAX_PRIMARY_WORKSPACES);
-        value.put("maxTabsPerWorkspace", ReBrowserStore.MAX_TABS_PER_WORKSPACE);
-        value.put("multiProfile",
-                WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE));
-        value.put("deleteBrowsingData",
-                WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA));
-        value.put("saveState", WebViewFeature.isFeatureSupported(WebViewFeature.SAVE_STATE));
-        value.put("downloads", createAdminDownloadPolicy());
-        return value;
-    }
-
-    private JSONObject createAdminDiagnostics() throws Exception {
-        JSONObject value = new JSONObject();
-        android.content.pm.PackageInfo provider = ReBrowserWebController.currentProvider();
-        value.put("webViewPackage", provider == null ? "" : provider.packageName);
-        value.put("webViewVersion", provider == null ? "" : provider.versionName);
-        value.put("multiProfile",
-                WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE));
-        value.put("activeWorkspaceId", activeWorkspace() == null ? "" : activeWorkspace().id);
-        ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
-        value.put("activeTabId", tab == null ? "" : tab.id);
-        value.put("activeOrigin", tab == null ? "" : safeOrigin(tab.url));
-        value.put("loading", tab != null && loadingTabIds.contains(tab.id));
-        value.put("loadProgress", tab == null ? 0 : tabLoadProgress.getOrDefault(tab.id, 0));
-        value.put("lastMainFrameError", tab == null ? ""
-                : tabLastErrors.getOrDefault(tab.id, ""));
-        value.put("fullscreenVideo", fullscreenController.isFullscreen());
-        value.put("globalOrientation", browserPreferences.globalOrientation());
-        value.put("videoOrientationOverride",
-                browserPreferences.videoOrientationOverrideEnabled());
-        value.put("videoOrientation", browserPreferences.videoOrientation());
-        value.put("activeWorkspaceCount", workspaces.size());
-        value.put("shelvedWorkspaceCount", shelvedSecondaryWorkspaces.size());
-        value.put("pendingProfileDeletionCount",
-                workspaceController.pendingProfileDeletions().size());
-        value.put("downloadRecordCount", downloads.size());
-        value.put("downloadsEnabled", downloadController.downloadsEnabled());
-        value.put("pendingDownloadCount", downloadController.pendingCount());
-        value.put("activeBlobTransfer", downloadController.hasActiveBlobTransfer());
-        return value;
-    }
-
-    private JSONObject createAdminDownloadPolicy() throws Exception {
-        return new JSONObject()
-                .put("downloadsEnabled", downloadController.downloadsEnabled())
-                .put("scope", "ReBrowser-named-profiles-only")
-                .put("rateWindowSeconds", 300)
-                .put("ordinaryRequestsPerSite", 2)
-                .put("siteDefinition", "profileName+topLevelOrigin")
-                .put("maxPendingGlobal", ReBrowserDownloadController.MAX_PENDING_GLOBAL)
-                .put("maxPendingPerSite", ReBrowserDownloadController.MAX_PENDING_PER_SITE)
-                .put("maxHistory", ReBrowserDownloads.MAX_RECORDS)
-                .put("maxBlobBytes", ReBrowserDownloads.MAX_BLOB_BYTES)
-                .put("maxDataBytes", ReBrowserDownloads.MAX_DATA_BYTES)
-                .put("automaticOpen", false)
-                .put("automaticInstall", false)
-                .put("rawCookieDisclosure", false)
-                .put("policyEffect", "new-and-pending-requests")
-                .put("runningDownloadsContinueWhenDisabled", true);
-    }
-
-    private JSONObject setAdminDownloadPolicy(JSONObject request) throws Exception {
-        int rejectedPending = downloadController.setDownloadsEnabled(
-                request.getBoolean("downloadsEnabled"));
-        return createAdminDownloadPolicy().put("rejectedPendingCount", rejectedPending);
-    }
-
-    private JSONObject createAdminDownloads() throws Exception {
-        downloadController.refresh();
-        JSONArray values = new JSONArray();
-        for (ReBrowserDownloads.Record record : downloads) {
-            values.put(adminDownloadDetails(record));
-        }
-        return new JSONObject()
-                .put("downloads", values)
-                .put("pendingCount", downloadController.pendingCount());
-    }
-
-    private JSONObject adminDownloadDetails(ReBrowserDownloads.Record record) throws Exception {
-        JSONObject value = new JSONObject();
-        value.put("downloadId", record.id);
-        value.put("kind", record.kind);
-        value.put("workspaceId", record.workspaceId);
-        value.put("tabId", record.tabId);
-        value.put("profileName", record.profileName);
-        value.put("sourceOrigin", record.sourceOrigin);
-        value.put("requestLocation", redactedDownloadLocation(record.url));
-        value.put("fileName", record.fileName);
-        value.put("mimeType", record.mimeType);
-        value.put("declaredSize", record.declaredSize);
-        value.put("downloadedBytes", record.downloadedBytes);
-        value.put("totalSize", record.totalSize);
-        value.put("status", record.status);
-        value.put("systemDownloadId", record.systemId);
-        value.put("sha256", record.sha256 == null ? "" : record.sha256);
-        value.put("hashAttempted", record.hashAttempted);
-        value.put("dangerous", record.dangerous);
-        value.put("riskReasons", record.riskReasons == null ? "" : record.riskReasons);
-        value.put("highFrequency", record.highFrequency);
-        value.put("rateCount", record.rateCount);
-        value.put("authenticatedRequest", record.cookieAttached);
-        value.put("createdAt", record.createdAt);
-        value.put("updatedAt", record.updatedAt);
-        value.put("error", record.error == null ? "" : record.error);
-        return value;
-    }
-
-    private static String redactedDownloadLocation(String value) {
-        try {
-            Uri uri = Uri.parse(value);
-            String scheme = uri.getScheme();
-            if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))) {
-                return scheme == null ? "" : scheme.toLowerCase(java.util.Locale.ROOT) + ":";
-            }
-            return safeOrigin(value);
-        } catch (RuntimeException ignored) {
-            return "";
-        }
-    }
-
-    private ReBrowserDownloads.Record requireAdminDownload(JSONObject request) {
-        ReBrowserDownloads.Record record = downloadController.find(
-                request.optString("downloadId"));
-        if (record == null) throw new IllegalStateException("download-not-found");
-        return record;
-    }
-
-    private JSONObject repairAdminDownloads() throws Exception {
-        ReBrowserDownloadController.RepairResult result = downloadController.repair();
-        return new JSONObject().put("refreshed", result.refreshed)
-                .put("expired", result.expired)
-                .put("removedDeleted", result.removedDeleted)
-                .put("remaining", result.remaining);
-    }
-
-    private JSONObject createAdminState() throws Exception {
-        JSONObject state = new JSONObject();
-        state.put("version", 2);
-        state.put("activeWorkspaceId", activeWorkspace() == null ? "" : activeWorkspace().id);
-        state.put("workspaces", createAdminWorkspaceValues(workspaces));
-        state.put("shelvedSecondaries",
-                createAdminWorkspaceValues(shelvedSecondaryWorkspaces));
-        return state;
-    }
-
-    private JSONArray createAdminWorkspaceValues(
-            List<ReBrowserStore.Workspace> source
-    ) throws Exception {
-        JSONArray workspaceValues = new JSONArray();
-        for (ReBrowserStore.Workspace workspace : source) {
-            JSONObject workspaceValue = new JSONObject();
-            workspaceValue.put("id", workspace.id);
-            workspaceValue.put("profileName", workspace.profileName);
-            workspaceValue.put("title", workspace.title);
-            workspaceValue.put("level", workspace.level.name());
-            workspaceValue.put("activeTabId", workspace.activeTabId);
-            JSONArray tabValues = new JSONArray();
-            for (ReBrowserStore.Tab tab : workspace.tabs) {
-                JSONObject tabValue = new JSONObject();
-                tabValue.put("id", tab.id);
-                tabValue.put("title", tab.title);
-                tabValue.put("origin", safeOrigin(tab.url));
-                tabValue.put("loading", loadingTabIds.contains(tab.id));
-                tabValue.put("loadProgress", tabLoadProgress.getOrDefault(tab.id, 0));
-                tabValue.put("lastMainFrameError", tabLastErrors.getOrDefault(tab.id, ""));
-                tabValues.put(tabValue);
-            }
-            workspaceValue.put("tabs", tabValues);
-            workspaceValues.put(workspaceValue);
-        }
-        return workspaceValues;
-    }
-
-    private JSONObject validateAdminState() throws Exception {
-        JSONArray issues = new JSONArray();
-        Set<String> workspaceIds = new java.util.HashSet<>();
-        Set<String> tabIds = new java.util.HashSet<>();
-        int primaryCount = 0;
-        Set<String> pendingProfileDeletions = workspaceController.pendingProfileDeletions();
-        for (ReBrowserStore.Workspace workspace : workspaces) {
-            if (!workspaceIds.add(workspace.id)) issues.put("duplicate-workspace:" + workspace.id);
-            if (workspace.level == ReBrowserStore.Level.PRIMARY) primaryCount++;
-            if (workspace.activeTab() == null) issues.put("missing-active-tab:" + workspace.id);
-            for (ReBrowserStore.Tab tab : workspace.tabs) {
-                if (!tabIds.add(tab.id)) issues.put("duplicate-tab:" + tab.id);
-            }
-            if (workspace.level != ReBrowserStore.Level.TEMPORARY
-                    && pendingProfileDeletions.contains(workspace.profileName)) {
-                issues.put("persistent-profile-pending-deletion:" + workspace.id);
-            }
-        }
-        for (ReBrowserStore.Workspace workspace : shelvedSecondaryWorkspaces) {
-            if (!workspaceIds.add(workspace.id)) issues.put("duplicate-workspace:" + workspace.id);
-            if (workspace.level != ReBrowserStore.Level.SECONDARY) {
-                issues.put("invalid-shelved-level:" + workspace.id);
-            }
-            if (pendingProfileDeletions.contains(workspace.profileName)) {
-                issues.put("shelved-profile-pending-deletion:" + workspace.id);
-            }
-            for (ReBrowserStore.Tab tab : workspace.tabs) {
-                if (!tabIds.add(tab.id)) issues.put("duplicate-tab:" + tab.id);
-            }
-        }
-        if (primaryCount > ReBrowserStore.MAX_PRIMARY_WORKSPACES) {
-            issues.put("primary-workspace-limit-exceeded");
-        }
-        if (workspaces.size() + shelvedSecondaryWorkspaces.size()
-                > ReBrowserStore.MAX_WORKSPACES) issues.put("workspace-limit-exceeded");
-        return new JSONObject().put("valid", issues.length() == 0).put("issues", issues);
-    }
-
-    private JSONObject repairAdminState() throws Exception {
-        int cancelledDeletionMarkers = 0;
-        Set<String> pendingProfileDeletions = workspaceController.pendingProfileDeletions();
-        for (ReBrowserStore.Workspace workspace : workspaces) {
-            workspace.activeTab();
-            if (workspace.level != ReBrowserStore.Level.TEMPORARY
-                    && pendingProfileDeletions.contains(workspace.profileName)) {
-                workspaceController.unmarkProfileForDeletion(workspace.profileName);
-                cancelledDeletionMarkers++;
-            }
-        }
-        for (ReBrowserStore.Workspace workspace : shelvedSecondaryWorkspaces) {
-            workspace.activeTab();
-            if (pendingProfileDeletions.contains(workspace.profileName)) {
-                workspaceController.unmarkProfileForDeletion(workspace.profileName);
-                cancelledDeletionMarkers++;
-            }
-        }
-        workspaceController.saveAll();
-        return new JSONObject().put("cancelledDeletionMarkers", cancelledDeletionMarkers)
-                .put("validation", validateAdminState());
-    }
-
-    private JSONObject adminTargetDetails(
-            ReBrowserStore.Workspace workspace,
-            ReBrowserStore.Tab tab
-    ) throws Exception {
-        JSONObject details = new JSONObject();
-        details.put("workspaceId", workspace == null ? "" : workspace.id);
-        details.put("tabId", tab == null ? "" : tab.id);
-        if (workspace != null) details.put("level", workspace.level.name());
-        return details;
-    }
-
-    private void queueAdminLoadWait(JSONObject request, ReBrowserStore.Tab tab) throws Exception {
-        request.put("_loadStarted", false);
-        JSONObject previous = pendingAdminLoads.put(tab.id, request);
-        if (previous != null) {
-            recordAdminStatus(previous, "failed", null, "superseded-by-new-navigation");
-        }
-        int timeoutSeconds = Math.max(1, Math.min(60, request.optInt("timeoutSeconds", 30)));
-        String requestId = request.getString("requestId");
-        root.postDelayed(() -> {
-            JSONObject pending = pendingAdminLoads.get(tab.id);
-            if (pending == null || !requestId.equals(pending.optString("requestId"))) return;
-            pendingAdminLoads.remove(tab.id);
-            recordAdminStatus(pending, "failed", null, "page-load-timeout");
-        }, timeoutSeconds * 1_000L);
-    }
-
-    private void finishAdminLoad(ReBrowserStore.Tab tab, boolean success, String error) {
-        if (tab == null) return;
-        JSONObject request = pendingAdminLoads.get(tab.id);
-        if (request == null || !request.optBoolean("_loadStarted", false)) return;
-        pendingAdminLoads.remove(tab.id);
-        try {
-            JSONObject details = adminTargetDetails(activeWorkspace(), tab);
-            details.put("origin", safeOrigin(tab.url));
-            details.put("title", tab.title);
-            details.put("loadProgress", tabLoadProgress.getOrDefault(tab.id, 0));
-            recordAdminStatus(request, success ? "completed" : "failed",
-                    success ? details : null, error);
-        } catch (Exception resultError) {
-            recordAdminStatus(request, "failed", null,
-                    resultError.getClass().getSimpleName());
-        }
-    }
-
-    private void recordAdminStatus(
-            JSONObject request,
-            String status,
-            JSONObject details,
-            String error
-    ) {
-        ReBrowserAdminProtocol.recordStatus(this, request, status,
-                request.optString("_authentication"), request.optString("_keyId"),
-                details, error);
-    }
-
     private static String safeOrigin(String value) {
         try {
             Uri uri = Uri.parse(value);
@@ -1080,13 +427,11 @@ public final class ReBrowserActivity extends Activity {
         return browserPreferences.searchUrl(clean);
     }
 
-    private void closeTab(ReBrowserStore.Tab tab) {
+    @Override
+    public void closeTab(ReBrowserStore.Tab tab) {
         ReBrowserStore.Workspace workspace = activeWorkspace();
         if (workspace == null || !workspace.tabs.contains(tab)) return;
-        JSONObject pendingLoad = pendingAdminLoads.remove(tab.id);
-        if (pendingLoad != null) {
-            recordAdminStatus(pendingLoad, "failed", null, "tab-closed-during-load");
-        }
+        adminController.onTabClosing(tab);
         ReBrowserWorkspaceController.TabCloseResult result = workspaceController.closeTab(
                 workspace, tab, browserPreferences.homeUrl());
         if (!result.valid) return;
@@ -1197,7 +542,8 @@ public final class ReBrowserActivity extends Activity {
                 .show();
     }
 
-    private void closeWorkspace(ReBrowserStore.Workspace closing) {
+    @Override
+    public void closeWorkspace(ReBrowserStore.Workspace closing) {
         if (!workspaces.contains(closing)) return;
         if (closing.level == ReBrowserStore.Level.PRIMARY) {
             toast("主总标签页不能关闭");
@@ -1254,7 +600,8 @@ public final class ReBrowserActivity extends Activity {
         }
     }
 
-    private void deleteProfileIfPossible(String profileName) {
+    @Override
+    public void deleteProfileIfPossible(String profileName) {
         if (!ReBrowserStore.isOwnedProfile(profileName)) return;
         try {
             ProfileStore.getInstance().deleteProfile(profileName);
@@ -1455,6 +802,11 @@ public final class ReBrowserActivity extends Activity {
         return divider;
     }
 
+    @Override
+    public void openSettings() {
+        startActivity(new Intent(this, ReBrowserSettingsActivity.class));
+    }
+
     private void reloadActivePage() {
         ReBrowserStore.Tab tab = activeWorkspace() == null ? null : activeWorkspace().activeTab();
         if (tab == null || webController.currentUrl(tab.id) == null) return;
@@ -1518,7 +870,8 @@ public final class ReBrowserActivity extends Activity {
                 .show();
     }
 
-    private void refreshLifecycleUi() {
+    @Override
+    public void refreshLifecycleUi() {
         updateChromeUi();
         if (overviewController.is(ReBrowserOverviewController.Page.WORKSPACES)) showWorkspaceOverview();
         if (overviewController.is(
@@ -1667,7 +1020,8 @@ public final class ReBrowserActivity extends Activity {
         showWorkspaceOverview();
     }
 
-    private void showWorkspaceOverview() {
+    @Override
+    public void showWorkspaceOverview() {
         if (activeWorkspace() == null) return;
         overviewController.show(ReBrowserOverviewController.Page.WORKSPACES);
         saveCurrentTabStates();
@@ -1854,7 +1208,8 @@ public final class ReBrowserActivity extends Activity {
         showChildOverview();
     }
 
-    private void showChildOverview() {
+    @Override
+    public void showChildOverview() {
         if (activeWorkspace() == null) return;
         overviewController.show(ReBrowserOverviewController.Page.CHILD_TABS);
         saveCurrentTabStates();
@@ -2031,7 +1386,8 @@ public final class ReBrowserActivity extends Activity {
         return page;
     }
 
-    private void showDownloadOverview() {
+    @Override
+    public void showDownloadOverview() {
         if (activeWorkspace() == null) return;
         downloadController.refresh();
         overviewController.show(ReBrowserOverviewController.Page.DOWNLOADS);
@@ -2347,7 +1703,8 @@ public final class ReBrowserActivity extends Activity {
         return page;
     }
 
-    private void hideOverview() {
+    @Override
+    public void hideOverview() {
         overviewController.hide();
         overviewContainer.animate().cancel();
         overviewContainer.setVisibility(View.GONE);
@@ -2502,10 +1859,7 @@ public final class ReBrowserActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        for (JSONObject request : new ArrayList<>(pendingAdminLoads.values())) {
-            recordAdminStatus(request, "failed", null, "activity-destroyed-during-load");
-        }
-        pendingAdminLoads.clear();
+        adminController.onDestroy();
         fullscreenController.hide();
         saveCurrentTabStates();
         destroyTabWebViews();
@@ -2550,17 +1904,7 @@ public final class ReBrowserActivity extends Activity {
         @Override
         public void onPageStarted(ReBrowserStore.Tab tab, String url, boolean visible) {
             workspaceController.updateTab(tab, url, null);
-            JSONObject pending = pendingAdminLoads.get(tab.id);
-            if (pending != null) {
-                try {
-                    pending.put("_loadStarted", true);
-                } catch (Exception ignored) {
-                    // Boolean insertion into a JSONObject cannot fail in normal operation.
-                }
-            }
-            loadingTabIds.add(tab.id);
-            tabLoadProgress.put(tab.id, 5);
-            tabLastErrors.remove(tab.id);
+            adminController.onPageStarted(tab);
             if (visible) {
                 omnibox.setText(ReBrowserStore.safeUrl(url));
                 progressBar.setVisibility(View.VISIBLE);
@@ -2576,15 +1920,13 @@ public final class ReBrowserActivity extends Activity {
                 boolean visible
         ) {
             workspaceController.updatePageMetadata(tab, url, title);
-            loadingTabIds.remove(tab.id);
-            tabLoadProgress.put(tab.id, 100);
+            adminController.onPageFinished(tab);
             saveWorkspaceMetadata();
             updateChromeUi();
             if (visible) {
                 omnibox.setText(ReBrowserStore.safeUrl(url));
                 progressBar.setVisibility(View.GONE);
             }
-            finishAdminLoad(tab, true, null);
         }
 
         @Override
@@ -2594,14 +1936,11 @@ public final class ReBrowserActivity extends Activity {
                 String description,
                 boolean visible
         ) {
-            loadingTabIds.remove(tab.id);
-            String detail = errorCode + ":" + description;
-            tabLastErrors.put(tab.id, detail.substring(0, Math.min(detail.length(), 200)));
+            adminController.onMainFrameError(tab, errorCode);
             if (visible) {
                 progressBar.setVisibility(View.GONE);
                 toast("页面连接失败");
             }
-            finishAdminLoad(tab, false, "page-load-error:" + errorCode);
         }
 
         @Override
@@ -2610,7 +1949,6 @@ public final class ReBrowserActivity extends Activity {
                 int progress,
                 boolean visible
         ) {
-            tabLoadProgress.put(tab.id, progress);
             if (!visible) return;
             progressBar.setProgress(progress);
             progressBar.setVisibility(progress >= 100 ? View.GONE : View.VISIBLE);

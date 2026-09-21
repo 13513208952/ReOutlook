@@ -121,6 +121,9 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
         final WebView webView;
         final long generation;
         long navigationGeneration;
+        boolean loading;
+        int loadProgress;
+        String lastMainFrameError = "";
 
         PageBinding(
                 String workspaceId,
@@ -267,7 +270,9 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
     }
 
     void stop(String tabId) {
-        requirePage(tabId).webView.stopLoading();
+        PageBinding page = requirePage(tabId);
+        page.webView.stopLoading();
+        page.loading = false;
     }
 
     void reload(String tabId) {
@@ -305,6 +310,21 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
     boolean isVisible(String tabId) {
         PageBinding page = pagesByTabId.get(tabId);
         return page != null && page.webView.getParent() == container;
+    }
+
+    boolean isLoading(String tabId) {
+        PageBinding page = pagesByTabId.get(tabId);
+        return page != null && page.loading;
+    }
+
+    int loadProgress(String tabId) {
+        PageBinding page = pagesByTabId.get(tabId);
+        return page == null ? 0 : page.loadProgress;
+    }
+
+    String lastMainFrameError(String tabId) {
+        PageBinding page = pagesByTabId.get(tabId);
+        return page == null ? "" : page.lastMainFrameError;
     }
 
     List<PageState> pageStates() {
@@ -548,6 +568,9 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
             PageBinding page = pagesByView.get(view);
             if (page == null) return;
             page.navigationGeneration++;
+            page.loading = true;
+            page.loadProgress = 5;
+            page.lastMainFrameError = "";
             listener.onPageStarted(page.tab, url, view.getParent() == container);
         }
 
@@ -555,6 +578,8 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
         public void onPageFinished(WebView view, String url) {
             PageBinding page = pagesByView.get(view);
             if (page == null) return;
+            page.loading = false;
+            page.loadProgress = 100;
             listener.onPageFinished(
                     page.tab, url, view.getTitle(), view.getParent() == container);
         }
@@ -587,6 +612,9 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
             if (!request.isForMainFrame()) return;
             PageBinding page = pagesByView.get(view);
             if (page == null) return;
+            page.loading = false;
+            String detail = error.getErrorCode() + ":" + error.getDescription();
+            page.lastMainFrameError = detail.substring(0, Math.min(detail.length(), 200));
             listener.onMainFrameError(page.tab, error.getErrorCode(),
                     String.valueOf(error.getDescription()), view.getParent() == container);
         }
@@ -606,8 +634,11 @@ final class ReBrowserWebController implements ReBrowserPageDownloadBridge {
         @Override
         public void onProgressChanged(WebView view, int progress) {
             PageBinding page = pagesByView.get(view);
-            if (page != null) listener.onProgressChanged(
-                    page.tab, progress, view.getParent() == container);
+            if (page != null) {
+                page.loadProgress = progress;
+                listener.onProgressChanged(
+                        page.tab, progress, view.getParent() == container);
+            }
         }
 
         @Override

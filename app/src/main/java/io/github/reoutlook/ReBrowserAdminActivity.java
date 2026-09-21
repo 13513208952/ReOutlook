@@ -210,8 +210,9 @@ public final class ReBrowserAdminActivity extends Activity {
         ReBrowserAdminProtocol.recordStatus(this, pendingRequest, "queued",
                 authentication, keyId, null, null);
         Intent browser = new Intent(this, ReBrowserActivity.class)
-                .setAction(ReBrowserActivity.ACTION_ADMIN_COMMAND)
-                .putExtra(ReBrowserActivity.EXTRA_ADMIN_REQUEST, pendingRequest.toString())
+                .setAction(ReBrowserAdminController.ACTION_ADMIN_COMMAND)
+                .putExtra(ReBrowserAdminController.EXTRA_ADMIN_REQUEST,
+                        pendingRequest.toString())
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                         | Intent.FLAG_ACTIVITY_CLEAR_TOP
                         | Intent.FLAG_ACTIVITY_SINGLE_TOP);
